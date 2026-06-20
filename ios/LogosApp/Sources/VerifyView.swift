@@ -32,7 +32,7 @@ struct VerifyView: View {
             .padding(Space.lg)
             .frame(maxWidth: 520).frame(maxWidth: .infinity)
         }
-        .logosBackground()
+        .logosBackground(watermark: true)
         .navigationTitle("Verify \(peer)")
         .navigationBarTitleDisplayMode(.inline)
     }

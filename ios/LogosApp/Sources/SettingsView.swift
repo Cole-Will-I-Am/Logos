@@ -14,7 +14,7 @@ struct SettingsView: View {
             .padding(Space.lg)
             .frame(maxWidth: 560).frame(maxWidth: .infinity)
         }
-        .logosBackground()
+        .logosBackground(watermark: true)
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
     }

@@ -119,8 +119,15 @@ enum Haptic {
 // MARK: - Modifiers
 
 extension View {
-    func logosBackground() -> some View {
-        background(LColor.canvas.ignoresSafeArea())
+    /// Canvas background, optionally with the faint λόγος wordmark watermark behind.
+    func logosBackground(watermark: Bool = false) -> some View {
+        background {
+            ZStack {
+                LColor.canvas
+                if watermark { LogosWatermark() }
+            }
+            .ignoresSafeArea()
+        }
     }
 
     /// Card surface: warm fill, hairline border, soft warm shadow.
@@ -133,6 +140,31 @@ extension View {
                     .strokeBorder(LColor.hairline, lineWidth: 1)
             )
             .shadow(color: Color.black.opacity(0.05), radius: 14, x: 0, y: 6)
+    }
+}
+
+// MARK: - Watermark
+
+/// Faint, centered λόγος wordmark for screen backgrounds. Uses the asset as a
+/// template tinted to `ink` (adaptive: dark on light, cream on dark) at a low,
+/// scheme-aware opacity so it never competes with content. Non-interactive.
+struct LogosWatermark: View {
+    @Environment(\.colorScheme) private var scheme
+    var widthFraction: CGFloat = 0.72
+
+    var body: some View {
+        GeometryReader { geo in
+            Image("WordmarkGreek")
+                .renderingMode(.template)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: min(geo.size.width * widthFraction, 360))
+                .foregroundStyle(LColor.ink)
+                .opacity(scheme == .dark ? 0.07 : 0.055)
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 

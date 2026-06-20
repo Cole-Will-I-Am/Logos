@@ -9,6 +9,7 @@ struct ConversationsView: View {
         NavigationStack {
             ZStack {
                 LColor.canvas.ignoresSafeArea()
+                LogosWatermark()
                 content
             }
             .navigationTitle(session.username.map { "@\($0)" } ?? "Logos")

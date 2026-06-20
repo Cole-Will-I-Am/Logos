@@ -16,7 +16,7 @@ struct ChatView: View {
             thread
             composer
         }
-        .logosBackground()
+        .logosBackground(watermark: true)
         .navigationTitle(peer)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
