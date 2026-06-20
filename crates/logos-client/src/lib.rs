@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use logos_identity::{
-    new_kem_prekey, new_one_time_prekey, new_signed_prekey, IdentityKeyPair, KemSecret,
+    new_kem_prekey, new_one_time_prekey, new_signed_prekey, IdentityKeyPair, IdentityPublic,
+    KemSecret,
 };
 use logos_pqxdh::{initiate, respond, InitialMessage};
 use logos_proto::{
@@ -19,7 +20,7 @@ use logos_proto::{
     ServerKeyResponse,
 };
 use logos_ratchet::RatchetState;
-use logos_sealed::{seal, unseal, SenderCertificate};
+use logos_sealed::{seal, unseal, SealedEnvelope, SenderCertificate};
 use serde::{Deserialize, Serialize};
 
 const ONE_TIME_PREKEY_COUNT: u32 = 20;
@@ -68,6 +69,10 @@ struct Store {
     kem_prekey_secret: Vec<u8>,
     one_time: Vec<OtkSecret>,
     sessions: HashMap<String, Session>,
+    /// TOFU-pinned identity per username (F-02/F-03): detects/blocks a relay
+    /// swapping a known contact's identity key.
+    #[serde(default)]
+    contacts: HashMap<String, IdentityPublic>,
     server_vk: Option<[u8; 32]>,
     cert: Option<SenderCertificate>,
 }
@@ -136,15 +141,19 @@ impl Client {
             kem_prekey_secret: kpk_sec.secret.to_bytes(),
             one_time: otk_sec,
             sessions: HashMap::new(),
+            contacts: HashMap::new(),
             server_vk: Some(server_vk.verifying_key),
             cert: None,
         };
-        let me = Self {
+        let mut me = Self {
             store,
             path: path.as_ref().to_path_buf(),
             server_url: server_url.to_string(),
             http,
         };
+        // F-06: acquire the sealed-sender certificate at registration time, so its
+        // issuance isn't correlated by the relay with a later send.
+        me.ensure_cert()?;
         me.save()?;
         Ok(me)
     }
@@ -230,6 +239,9 @@ impl Client {
             .json()
             .map_err(err)?;
         let bundle = resp.bundle;
+        // F-02/F-03: TOFU-pin the recipient identity from the directory; refuse if
+        // it changed from a previously seen value (possible relay key-substitution).
+        self.pin_identity(to, &bundle.identity)?;
         let init = initiate(&self.identity(), &bundle).map_err(err)?;
         let ratchet = RatchetState::init_initiator(init.root_key, init.responder_signed_prekey_pub);
         self.store.sessions.insert(
@@ -301,31 +313,59 @@ impl Client {
         let dh_priv = self.identity_dh_priv();
         let mut out = Vec::new();
 
+        // F-07: process each envelope independently; a malformed/undecryptable one
+        // is quarantined (skipped) rather than failing the whole batch.
         for env in resp.envelopes {
-            let (cert, payload) = unseal(&dh_priv, &env, &server_vk, now()).map_err(err)?;
-            let from = cert.sender_username.clone();
-            let outer: OuterMessage = serde_json::from_slice(&payload).map_err(err)?;
-            match outer {
-                OuterMessage::Prekey { initial, ratchet } => {
-                    let text = self.establish_and_decrypt(&cert, initial, ratchet)?;
-                    out.push(Incoming { from, text });
-                }
-                OuterMessage::Normal { ratchet } => {
-                    let session = self
-                        .store
-                        .sessions
-                        .get_mut(&from)
-                        .ok_or_else(|| ClientError(format!("no session for {from}")))?;
-                    let pt = session.ratchet.decrypt(&ratchet, b"").map_err(err)?;
-                    out.push(Incoming {
-                        from,
-                        text: String::from_utf8_lossy(&pt).into_owned(),
-                    });
-                }
+            if let Ok(inc) = self.process_envelope(&env, &server_vk, &dh_priv) {
+                out.push(inc);
             }
         }
         self.save()?;
         Ok(out)
+    }
+
+    fn process_envelope(
+        &mut self,
+        env: &SealedEnvelope,
+        server_vk: &[u8; 32],
+        dh_priv: &[u8; 32],
+    ) -> Result<Incoming> {
+        let (cert, payload) = unseal(dh_priv, env, server_vk, now()).map_err(err)?;
+        let from = cert.sender_username.clone();
+        let outer: OuterMessage = serde_json::from_slice(&payload).map_err(err)?;
+        match outer {
+            OuterMessage::Prekey { initial, ratchet } => {
+                let text = self.establish_and_decrypt(&cert, initial, ratchet)?;
+                Ok(Incoming { from, text })
+            }
+            OuterMessage::Normal { ratchet } => {
+                let session = self
+                    .store
+                    .sessions
+                    .get_mut(&from)
+                    .ok_or_else(|| ClientError(format!("no session for {from}")))?;
+                let pt = session.ratchet.decrypt(&ratchet, b"").map_err(err)?;
+                Ok(Incoming {
+                    from,
+                    text: String::from_utf8_lossy(&pt).into_owned(),
+                })
+            }
+        }
+    }
+
+    /// TOFU identity pinning: first sighting is recorded; a later mismatch is
+    /// refused (F-02/F-03). Real continuous verification needs key transparency.
+    fn pin_identity(&mut self, username: &str, identity: &IdentityPublic) -> Result<()> {
+        match self.store.contacts.get(username) {
+            Some(known) if known != identity => Err(ClientError(format!(
+                "identity for '{username}' changed — refusing (possible impersonation/MITM)"
+            ))),
+            Some(_) => Ok(()),
+            None => {
+                self.store.contacts.insert(username.to_string(), *identity);
+                Ok(())
+            }
+        }
     }
 
     fn establish_and_decrypt(
@@ -334,6 +374,16 @@ impl Client {
         initial: InitialMessage,
         ratchet_msg: logos_ratchet::RatchetMessage,
     ) -> Result<String> {
+        // F-02/F-03: the sealed-sender cert is only delivery authorization. The
+        // real sender identity is the PQXDH initiator identity (proven by the
+        // handshake DH legs). Bind them, then TOFU-pin — so a malicious relay
+        // can't forge a cert to impersonate or hijack a known contact's session.
+        if cert.sender_identity != initial.initiator_identity {
+            return Err(ClientError(
+                "sender certificate identity does not match handshake identity".into(),
+            ));
+        }
+        self.pin_identity(&cert.sender_username, &cert.sender_identity)?;
         if initial.signed_prekey_id != self.store.signed_prekey_id {
             return Err(ClientError("unknown signed prekey id".into()));
         }

@@ -161,17 +161,47 @@ pub struct PreKeyBundle {
     pub kem_prekey: KemPreKeyPublic,
 }
 
+/// Domain-separated, identity-bound message a prekey signature covers (F-10):
+/// binds purpose/version, the owning identity, the key id, and the key bytes —
+/// so a signature can't be lifted onto a different key, id, identity, or use.
+pub fn prekey_sig_msg(
+    domain: &[u8],
+    identity: &IdentityPublic,
+    key_id: u32,
+    key_bytes: &[u8],
+) -> Vec<u8> {
+    let mut v = Vec::with_capacity(domain.len() + 64 + 4 + key_bytes.len());
+    v.extend_from_slice(domain);
+    v.extend_from_slice(&identity.encode());
+    v.extend_from_slice(&key_id.to_be_bytes());
+    v.extend_from_slice(key_bytes);
+    v
+}
+
+const SPK_DOMAIN: &[u8] = b"LogosSignedPreKeyv1";
+const KEM_DOMAIN: &[u8] = b"LogosKemPreKeyv1";
+
 impl PreKeyBundle {
     /// Verify the signed-prekey and kem-prekey signatures bind to this identity.
     pub fn verify(&self) -> Result<(), IdentityError> {
         verify(
             &self.identity,
-            &self.signed_prekey.public,
+            &prekey_sig_msg(
+                SPK_DOMAIN,
+                &self.identity,
+                self.signed_prekey.id,
+                &self.signed_prekey.public,
+            ),
             &self.signed_prekey.signature,
         )?;
         verify(
             &self.identity,
-            &self.kem_prekey.public,
+            &prekey_sig_msg(
+                KEM_DOMAIN,
+                &self.identity,
+                self.kem_prekey.id,
+                &self.kem_prekey.public,
+            ),
             &self.kem_prekey.signature,
         )?;
         Ok(())
@@ -201,7 +231,9 @@ pub fn new_signed_prekey(
 ) -> (SignedPreKeyPublic, SignedPreKeySecret) {
     let secret = X25519Secret::random_from_rng(rand::rngs::OsRng);
     let public = X25519Public::from(&secret).to_bytes();
-    let signature = identity.sign(&public).to_vec();
+    let signature = identity
+        .sign(&prekey_sig_msg(SPK_DOMAIN, &identity.public(), id, &public))
+        .to_vec();
     (
         SignedPreKeyPublic {
             id,
@@ -224,7 +256,14 @@ pub fn new_one_time_prekey(id: u32) -> (OneTimePreKeyPublic, OneTimePreKeySecret
 pub fn new_kem_prekey(id: u32, identity: &IdentityKeyPair) -> (KemPreKeyPublic, KemPreKeySecret) {
     let (secret, public) = kem::generate();
     let public_bytes = public.to_bytes();
-    let signature = identity.sign(&public_bytes).to_vec();
+    let signature = identity
+        .sign(&prekey_sig_msg(
+            KEM_DOMAIN,
+            &identity.public(),
+            id,
+            &public_bytes,
+        ))
+        .to_vec();
     (
         KemPreKeyPublic {
             id,

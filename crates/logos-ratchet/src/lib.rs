@@ -15,12 +15,17 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
 use x25519_dalek::{PublicKey as X25519Public, StaticSecret as X25519Secret};
+use zeroize::Zeroize;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Bound on how many message keys we will skip (and store) for out-of-order
-/// delivery before refusing — prevents a malicious header from exhausting memory.
+/// Bound on how many message keys we will skip in a single chain step before
+/// refusing — prevents a malicious header from forcing huge work.
 const MAX_SKIP: u32 = 1000;
+
+/// Global bound on total stored skipped message keys (across chains). Oldest are
+/// evicted FIFO past this — bounds memory regardless of ratchet churn (F-09).
+const MAX_SKIP_TOTAL: usize = 2000;
 
 #[derive(Debug, Error)]
 pub enum RatchetError {
@@ -212,7 +217,22 @@ impl RatchetState {
         RatchetMessage { header, ciphertext }
     }
 
+    /// Decrypt a message. **Transactional**: all state changes (DH ratchet,
+    /// chain advance, skipped keys) are staged on a clone and committed only if
+    /// AEAD authentication succeeds — a forged/invalid message cannot mutate or
+    /// desynchronize the receiver (Double Ratchet spec requirement).
     pub fn decrypt(
+        &mut self,
+        msg: &RatchetMessage,
+        associated_data: &[u8],
+    ) -> Result<Vec<u8>, RatchetError> {
+        let mut staged = self.clone();
+        let pt = staged.decrypt_inner(msg, associated_data)?;
+        *self = staged;
+        Ok(pt)
+    }
+
+    fn decrypt_inner(
         &mut self,
         msg: &RatchetMessage,
         associated_data: &[u8],
@@ -226,12 +246,14 @@ impl RatchetState {
         }
         self.skip_message_keys(msg.header.n)?;
         let ck = self.ckr.ok_or(RatchetError::NoReceivingChain)?;
-        let (new_ck, mk) = kdf_ck(&ck);
+        let (new_ck, mut mk) = kdf_ck(&ck);
         self.ckr = Some(new_ck);
         self.nr += 1;
         let mut ad = associated_data.to_vec();
         ad.extend_from_slice(&msg.header.as_ad());
-        aead_decrypt(&mk, &msg.ciphertext, &ad)
+        let pt = aead_decrypt(&mk, &msg.ciphertext, &ad);
+        mk.zeroize();
+        pt
     }
 
     fn try_skipped(
@@ -264,6 +286,11 @@ impl RatchetState {
             while self.nr < until {
                 let (new_ck, mk) = kdf_ck(&ck);
                 ck = new_ck;
+                // Global cap: bound total stored skipped keys (FIFO eviction) so a
+                // sequence of ratchet steps can't grow memory without limit.
+                if self.skipped.len() >= MAX_SKIP_TOTAL {
+                    self.skipped.remove(0);
+                }
                 self.skipped.push(Skipped {
                     dh: dhr,
                     n: self.nr,
@@ -335,6 +362,30 @@ mod tests {
         let mut m = a.encrypt(b"secret", b"ad");
         m.ciphertext[0] ^= 0xff;
         assert!(b.decrypt(&m, b"ad").is_err());
+    }
+
+    #[test]
+    fn forged_message_does_not_mutate_state() {
+        let (mut a, mut b) = pair([11u8; 32]);
+        let m1 = a.encrypt(b"hi", b"");
+        assert_eq!(b.decrypt(&m1, b"").unwrap(), b"hi");
+
+        let before = serde_json::to_vec(&b).unwrap();
+        // A forged message with a NEW dh header (would trigger a DH ratchet) but a
+        // broken AEAD tag must leave the receiver completely unchanged.
+        let mut forged = a.encrypt(b"tampered", b"");
+        forged.header.dh = [42u8; 32];
+        forged.ciphertext[0] ^= 0xff;
+        assert!(b.decrypt(&forged, b"").is_err());
+        assert_eq!(
+            before,
+            serde_json::to_vec(&b).unwrap(),
+            "forged msg mutated state"
+        );
+
+        // And the receiver still works on the next legitimate message.
+        let m2 = a.encrypt(b"still works", b"");
+        assert_eq!(b.decrypt(&m2, b"").unwrap(), b"still works");
     }
 
     #[test]

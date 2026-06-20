@@ -23,6 +23,8 @@ const F: [u8; 32] = [0xFF; 32];
 pub enum PqxdhError {
     #[error("prekey bundle signature invalid")]
     BadBundle,
+    #[error("one-time prekey was selected but its secret is missing")]
+    MissingOneTimePrekey,
     #[error("identity: {0}")]
     Identity(#[from] logos_identity::IdentityError),
 }
@@ -164,7 +166,7 @@ pub fn respond(
     ikm.extend_from_slice(&dh2);
     ikm.extend_from_slice(&dh3);
     if msg.one_time_prekey_id.is_some() {
-        let otk_priv = one_time_prekey_priv.expect("one-time prekey selected but secret missing");
+        let otk_priv = one_time_prekey_priv.ok_or(PqxdhError::MissingOneTimePrekey)?;
         let dh4 = dh(&X25519Secret::from(otk_priv), &msg.ephemeral_pub);
         ikm.extend_from_slice(&dh4);
     }

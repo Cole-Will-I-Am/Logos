@@ -45,14 +45,33 @@ struct Inner {
 #[derive(Clone)]
 pub struct AppState(Arc<Mutex<Inner>>);
 
-pub fn new_state() -> AppState {
-    let signing = SigningKey::generate(&mut rand::rngs::OsRng);
+fn state_from_seed(seed: [u8; 32]) -> AppState {
+    let signing = SigningKey::from_bytes(&seed);
     AppState(Arc::new(Mutex::new(Inner {
         directory: HashMap::new(),
         mailboxes: HashMap::new(),
         server_seed: signing.to_bytes(),
         server_vk: signing.verifying_key().to_bytes(),
     })))
+}
+
+/// In-memory state with an ephemeral signing key (used by tests).
+pub fn new_state() -> AppState {
+    state_from_seed(SigningKey::generate(&mut rand::rngs::OsRng).to_bytes())
+}
+
+/// Persist the sealed-sender signing key at `path` so a relay restart keeps the
+/// same `server_vk` that clients have pinned (F-13).
+pub fn new_state_at(path: &str) -> AppState {
+    let seed: [u8; 32] = match std::fs::read(path) {
+        Ok(b) if b.len() == 32 => b.try_into().unwrap(),
+        _ => {
+            let s = SigningKey::generate(&mut rand::rngs::OsRng).to_bytes();
+            let _ = std::fs::write(path, s);
+            s
+        }
+    };
+    state_from_seed(seed)
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -174,8 +193,9 @@ async fn get_mailbox(State(state): State<AppState>, Path(id): Path<String>) -> J
     Json(FetchResponse { envelopes })
 }
 
-/// Run the relay on `addr` until the process exits.
-pub async fn run(addr: std::net::SocketAddr) -> std::io::Result<()> {
+/// Run the relay on `addr` until the process exits, persisting the signing key
+/// at `key_path` so restarts keep the same `server_vk`.
+pub async fn run(addr: std::net::SocketAddr, key_path: &str) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, build_router(new_state())).await
+    axum::serve(listener, build_router(new_state_at(key_path))).await
 }
