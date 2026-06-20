@@ -1,0 +1,26 @@
+[package]
+name = "logos-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "logos_ffi"
+# `lib` so Rust tests can use it; `staticlib`/`cdylib` for the iOS xcframework and
+# for UniFFI's library-mode Swift binding generation.
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+logos-client.workspace = true
+uniffi = { version = "0.28", features = ["cli"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+logos-server.workspace = true
+tokio.workspace = true
+axum.workspace = true

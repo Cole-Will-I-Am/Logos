@@ -1,0 +1,101 @@
+//! UniFFI surface for Logos — exposes the `logos-client` engine to Swift (iOS)
+//! and other languages without reimplementing any crypto/protocol logic.
+//!
+//! The Rust client API is synchronous and plain-typed, so the binding is a thin
+//! wrapper: a `LogosClient` object (mutable client state behind a `Mutex`, since
+//! UniFFI object methods take `&self`) plus a record and an error type.
+//!
+//! EXPERIMENTAL — UNAUDITED.
+
+use std::sync::{Arc, Mutex};
+
+use logos_client::Client;
+
+uniffi::setup_scaffolding!();
+
+/// Errors surfaced across the FFI boundary (single-message, FFI-friendly).
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum LogosError {
+    #[error("{msg}")]
+    Client { msg: String },
+}
+
+impl From<logos_client::ClientError> for LogosError {
+    fn from(e: logos_client::ClientError) -> Self {
+        LogosError::Client { msg: e.to_string() }
+    }
+}
+
+/// A received, decrypted message.
+#[derive(uniffi::Record)]
+pub struct IncomingMessage {
+    pub from: String,
+    pub text: String,
+}
+
+/// Stateful Logos client. Construct with `create` (new identity, registers with
+/// the relay) or `load` (existing on-disk store), then `send` / `recv`.
+#[derive(uniffi::Object)]
+pub struct LogosClient {
+    inner: Mutex<Client>,
+}
+
+#[uniffi::export]
+impl LogosClient {
+    /// Create a new identity, register it with the relay, and persist to `path`.
+    #[uniffi::constructor]
+    pub fn create(
+        path: String,
+        server_url: String,
+        username: String,
+    ) -> Result<Arc<Self>, LogosError> {
+        let client = Client::create(&path, &server_url, &username)?;
+        Ok(Arc::new(Self {
+            inner: Mutex::new(client),
+        }))
+    }
+
+    /// Load an existing client store from `path`.
+    #[uniffi::constructor]
+    pub fn load(path: String, server_url: String) -> Result<Arc<Self>, LogosError> {
+        let client = Client::load(&path, &server_url)?;
+        Ok(Arc::new(Self {
+            inner: Mutex::new(client),
+        }))
+    }
+
+    /// This client's username.
+    pub fn username(&self) -> String {
+        self.inner
+            .lock()
+            .expect("client lock")
+            .username()
+            .to_string()
+    }
+
+    /// Our mailbox id (where peers deliver to us).
+    pub fn mailbox(&self) -> String {
+        self.inner.lock().expect("client lock").mailbox()
+    }
+
+    /// Encrypt and deliver `message` to `to`.
+    pub fn send(&self, to: String, message: String) -> Result<(), LogosError> {
+        self.inner
+            .lock()
+            .expect("client lock")
+            .send(&to, &message)?;
+        Ok(())
+    }
+
+    /// Fetch, decrypt, and return all pending messages.
+    pub fn recv(&self) -> Result<Vec<IncomingMessage>, LogosError> {
+        let msgs = self.inner.lock().expect("client lock").recv()?;
+        Ok(msgs
+            .into_iter()
+            .map(|m| IncomingMessage {
+                from: m.from,
+                text: m.text,
+            })
+            .collect())
+    }
+}
