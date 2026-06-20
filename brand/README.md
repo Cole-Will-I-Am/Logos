@@ -6,6 +6,7 @@ variants (favicons, iOS app-icon sets, etc.) from these as needed.
 | File | What it is | Use for |
 |------|------------|---------|
 | `logos-wordmark.png` | Full lockup — column mark above the serif "Logos" wordmark (1254×1254, cream bg) | README headers, splash, marketing, about screen |
+| `logos-wordmark-transparent.png` | Same lockup, **real transparent bg** (1254×1254, RGBA; background keyed out) | Placing the wordmark on **light** backgrounds. Note: the "Logos" text is dark ink, so it does **not** read on dark backgrounds — an inverted/light wordmark is still needed for dark UI |
 | `logos-icon.png` | Column-in-circle mark (1254×1254, cream bg) | App icon, favicon, avatar, compact mark |
 | `logos-emblem-book.png` | Ornate emblem — open book + sun + column on a shield (1024×1024, transparent) | Decorative / alternate badge |
 
