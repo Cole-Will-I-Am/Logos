@@ -27,6 +27,51 @@ Cross-cutting hardening (any time, non-blocking): redb relay persistence + TTL,
 Argon2id client-store encryption, prekey-fetch rate limits (F-08), full zeroization
 (F-12). Then later phases P4 (MLS groups) / P5 (mixnet, blinded mailbox, PSI).
 
+## ▶︎ Security-review follow-ups (open — from PR #1 `security-review-fixes`)
+
+PR #1 landed a security review of the crypto/glue layers (mailbox key-confusion,
+ratchet/store durability, prekey-replay reset, key persistence, doc drift; with
+new regression tests). **Caveat:** PR #1 changed `mailbox_id` to hash the full
+identity (`ed||dh`) — a **wire/format change**, so existing client stores and any
+deployed relay must be reset together when it merges.
+
+Still open (NOT in PR #1), roughly by priority:
+
+1. **iOS UI / error surfacing** *(high)* — `ios/LogosApp/Sources/Session.swift`
+   appends the message bubble before `client.send` and only stores `lastError`
+   (rendered only in onboarding), so MITM/TOFU refusals and send failures show as
+   "delivered". Mark bubbles sent only after success; surface `lastError` in
+   Conversations/Chat; distinguish security refusals from network errors. Also:
+   create `Application Support` before first `create()/save()` (else first-run
+   ENOENT), and set `isExcludedFromBackup` + `FileProtection` on the store
+   (plaintext identity secret currently goes into device backups).
+2. **Hybridize sealed sender (PQ metadata)** *(medium)* — the sealed-sender
+   envelope uses classical X25519 to the recipient's static identity key, so
+   sender-identity metadata is not post-quantum (harvest-now-decrypt-later),
+   unlike message keys (PQXDH). Hybridize using the recipient's ML-KEM prekey, or
+   explicitly scope it out in the threat model.
+3. **Full zeroization (F-12)** *(medium, defense-in-depth)* — `RatchetState`/
+   `Skipped` (and the per-message `decrypt()` clone), PQXDH `dh1..dh4`/`ss`, sealed
+   `shared`/`key`/`plaintext`, and the client `Store` secrets are not zeroized,
+   despite the crates advertising FS/PCS and `logos-identity` advertising
+   ZeroizeOnDrop. Derive `ZeroizeOnDrop` (with `#[zeroize(skip)]` on public fields).
+4. **CI supply-chain (F-08 sibling)** *(medium)* — SHA-pin every `uses:`
+   (`dtolnay/rust-toolchain@stable` is a mutable branch), add `cargo deny`/`cargo
+   audit`, pin the toolchain version in `rust-toolchain.toml`. (PR #1 already added
+   `permissions: contents: read` + `if-no-files-found: error`.)
+5. **Relay abuse controls** *(low/medium)* — `/v1/mailbox` posting and
+   `/v1/directory` fetches are unauthenticated; PR #1 added a per-mailbox cap, but
+   rate limiting, TTL sweeping, and one-time-prekey replenishment are still needed
+   (fold into the redb persistence item). Also persist `next_id` (in-memory reset
+   to 0 enables stale-ACK replay after restart).
+6. **Client response-size cap** *(medium)* — PR #1 added HTTP timeouts; still cap
+   relay response body size before deserializing (a malicious relay can return a
+   giant JSON body → OOM).
+7. **Nits** — `now()` unwraps panic if the device clock is < 1970 (crosses FFI as
+   an app crash); consider binding prekey ids in the PQXDH transcript `info`
+   (defense-in-depth; DH legs already bind the key values); replace server
+   `Mutex::lock().unwrap()` with poison-tolerant locking.
+
 **CI note:** private-repo Actions are blocked by a GitHub account spending limit, so
 each build runs via flip-public → run → revert-private. Build locally-equivalent
 with `cargo test --workspace`; the iOS build is `gh workflow run build` (while public).
