@@ -29,3 +29,5 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait"
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_VERSION: "5.9"
+    scheme:
+      testTargets: []

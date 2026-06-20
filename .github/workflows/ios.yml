@@ -1,0 +1,60 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "ios/**"
+      - "scripts/build-ios.sh"
+      - "Cargo.*"
+      - ".github/workflows/ios.yml"
+
+jobs:
+  # Fast Linux job: the whole Rust workspace (incl. the FFI crate + smoke test).
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy rustfmt
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo fmt --check
+
+  # macOS job: build the xcframework + compile the SwiftUI app for the Simulator.
+  # No code signing required for a simulator build, so this validates that the
+  # whole iOS surface compiles without an Apple account.
+  ios:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain + iOS targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+      - name: Build LogosKit.xcframework + Swift bindings
+        run: ./scripts/build-ios.sh
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        working-directory: ios/LogosApp
+        run: xcodegen generate
+      - name: Build app (iOS Simulator, unsigned)
+        working-directory: ios/LogosApp
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project LogosApp.xcodeproj \
+            -scheme LogosApp \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Upload xcframework artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LogosKit-xcframework
+          path: ios/LogosKit/LogosFFI.xcframework
+          if-no-files-found: warn
