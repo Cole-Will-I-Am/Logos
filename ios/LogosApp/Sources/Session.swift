@@ -5,7 +5,7 @@ import LogosKit
 /// NOTE: `.blocked` is currently inferred from the error text (heuristic) because
 /// the FFI only returns `LogosError.Client(msg:)`. The robust fix is a typed FFI
 /// error (e.g. `LogosError.IdentityChanged`) — see docs/DESIGN.md → "FFI additions".
-enum MessageStatus: Equatable {
+enum MessageStatus: Equatable, Codable {
     case sending
     case sent
     case failed(String)   // network/unknown — safe to retry
@@ -13,11 +13,12 @@ enum MessageStatus: Equatable {
 }
 
 /// Per-conversation security posture surfaced to the UI.
-enum SessionSecurity { case encrypted, verified, identityChanged }
+enum SessionSecurity: String, Codable { case encrypted, verified, identityChanged }
 
 /// One displayed chat message (UI-side; the cryptographic session state lives in
-/// the Rust store). History is in-memory for this MVP — persisting it is a follow-up.
-struct ChatMessage: Identifiable, Equatable {
+/// the Rust store). Persisted to disk via `HistorySnapshot` so history survives
+/// app suspension/relaunch.
+struct ChatMessage: Identifiable, Equatable, Codable {
     let id = UUID()
     let text: String
     let mine: Bool
@@ -40,6 +41,7 @@ final class Session: ObservableObject {
 
     private var client: LogosClient?
     private let storePath: String
+    private let historyPath: String
     private var pollTask: Task<Void, Never>?
 
     init() {
@@ -48,7 +50,9 @@ final class Session: ObservableObject {
         // Create Application Support up front — `create()/save()` ENOENTs on first run otherwise.
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         storePath = dir.appendingPathComponent("logos-store.json").path
+        historyPath = dir.appendingPathComponent("logos-history.json").path
         relayURL = UserDefaults.standard.string(forKey: "relayURL") ?? "https://relay.manticthink.com"
+        loadHistory()
         loadIfExists()
     }
 
@@ -89,6 +93,7 @@ final class Session: ObservableObject {
     func startConversation(with peer: String) {
         if !conversations.contains(peer) { conversations.append(peer) }
         if messages[peer] == nil { messages[peer] = [] }
+        persist()
     }
 
     func send(to peer: String, text: String) {
@@ -134,9 +139,53 @@ final class Session: ObservableObject {
         guard var arr = messages[peer], let i = arr.firstIndex(where: { $0.id == id }) else { return }
         arr[i].status = status
         messages[peer] = arr
+        persist()
     }
 
     func clearError() { lastError = nil }
+
+    // MARK: - Local chat history persistence
+
+    /// On-disk snapshot of the UI-side chat history (the Rust store holds only the
+    /// cryptographic session state, not displayed messages). Written atomically with
+    /// iOS file protection so it isn't lost when the app is suspended/terminated.
+    /// NOTE: message text is stored in cleartext here, matching the current store
+    /// posture — full at-rest encryption (Argon2id) is a tracked follow-up.
+    private struct HistorySnapshot: Codable {
+        var conversations: [String]
+        var messages: [String: [ChatMessage]]
+        var security: [String: SessionSecurity]
+    }
+
+    private func loadHistory() {
+        guard FileManager.default.fileExists(atPath: historyPath),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: historyPath)),
+              let snap = try? JSONDecoder().decode(HistorySnapshot.self, from: data)
+        else { return }
+        conversations = snap.conversations
+        security = snap.security
+        // A message still `.sending` at last save never confirmed delivery — surface
+        // it as failed-but-retryable rather than a spinner that never resolves.
+        messages = snap.messages.mapValues { arr in
+            arr.map { m in
+                guard case .sending = m.status else { return m }
+                var fixed = m; fixed.status = .failed("Interrupted — tap to retry"); return fixed
+            }
+        }
+    }
+
+    private func persist() {
+        let snap = HistorySnapshot(conversations: conversations, messages: messages, security: security)
+        do {
+            let data = try JSONEncoder().encode(snap)
+            var url = URL(fileURLWithPath: historyPath)
+            try data.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
+            var rv = URLResourceValues(); rv.isExcludedFromBackup = true
+            try? url.setResourceValues(rv)
+        } catch {
+            // Best-effort: never crash the app over history persistence.
+        }
+    }
 
     // MARK: - Error classification (typed — driven by the FFI's LogosError)
 
@@ -206,6 +255,7 @@ final class Session: ObservableObject {
                     ChatMessage(text: m.text, mine: false, status: .sent, at: Date()))
                 if security[m.from] == nil { security[m.from] = .encrypted }
             }
+            if !incoming.isEmpty { persist() }
         } catch {
             lastError = friendly(error)
         }
