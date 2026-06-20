@@ -28,7 +28,7 @@ endgame (→ P3).
 - ✅ `LogosKit` SwiftPM package + SwiftUI app source (`ios/LogosApp`) — authored; not yet compiled locally (no Mac here).
 - ✅ Relay deployed on the VPS as `logos-relay.service` (systemd) — **localhost-only** for now.
 - ✅ CI workflow (`.github/workflows/ios.yml`) — Linux Rust checks + macOS xcframework + Simulator app build.
-- 🚧 **Green CI build** — validating the Swift on a macOS runner. (Account spending limit blocks private-repo Actions, so builds run via the flip-public pattern; revert to private after each run.)
+- ✅ **CI build green** — the SwiftUI app + LogosKit.xcframework compile on a macOS runner (`macos-15`/Xcode 16); Rust workspace checks pass on Linux. (Private-repo Actions are blocked by an account spending limit, so builds run via the flip-public pattern, reverting to private after each run.)
 - ⬜ **Public TLS relay endpoint** so a device can connect (currently localhost).
 - ⬜ **TestFlight / device build** — needs an Apple developer account + signing secrets.
 
