@@ -35,8 +35,13 @@ test where two clients exchange encrypted messages through a live relay.
 | `logos-client` | Sync, FFI-friendly client engine: register / send / recv; file-backed session store |
 | `logos-cli` | `logos` dev binary: `register` / `send` / `recv` / `whoami` |
 
-The relay only ever sees public keys, opaque sealed envelopes addressed to a
-mailbox id, and cert requests — never plaintext, and never who sent a message.
+The relay never sees message plaintext, and sealed sender keeps it from learning
+who sent a delivered message. Honest caveats (tracked, not yet closed): it still
+sees recipient mailbox + timing; mailbox fetch is not yet authenticated/ACK-based
+(a known address could be drained — fix in progress); and it currently issues the
+sealed-sender certificates, so under a fully malicious operator that authority
+should move to key transparency / a separate issuer (sender identity is already
+TOFU-pinned client-side as a first defense).
 
 ## Quickstart
 

@@ -48,7 +48,7 @@ The **initial message** carries: `IK_A`, `EK_A_pub`, the selected prekey ids, an
 `KEM_CT`. B re-derives the identical `DH1..DH4`, decapsulates `KEM_CT` with its KEM
 secret to get `SS`, and computes the same `RK`.
 
-- **Hybrid:** recovering `RK` requires breaking both X25519 (the DH legs) and
+- **Hybrid** (caveat below re: reusable KEM prekey): recovering `RK` requires breaking both X25519 (the DH legs) and
   ML-KEM-1024 (`SS`).
 - **Transcript binding:** identities, ephemeral, and KEM ciphertext are bound via
   `info`, so a tampered/downgraded handshake yields a different key (tested).
@@ -98,11 +98,31 @@ The relay sees only `{ mailbox_id, envelope }` — no sender. R derives the same
 `shared` with `ik_dh_R_priv`, decrypts, then **verifies the certificate** against
 the known server key and checks expiry before trusting the sender identity.
 
-## Known limitations (Phase 1)
+## Session continuity & sender identity (Phase 2)
 
-- No networked relay yet (Phase 2): mailbox addressing, blinded/rotating mailbox
-  ids, and delete-on-deliver semantics are not implemented here.
-- Single device per identity; no multi-device session fan-out.
-- TOFU directory model; **no key-transparency log/auditing** yet — a malicious
-  directory could substitute a prekey-bundle identity key undetected. (Future work.)
+- The relay-issued sealed-sender **certificate is delivery authorization only**.
+  A message's true sender identity is the **PQXDH initiator identity**, which the
+  handshake proves (DH1 = DH(IK_A, SPK_B) only matches if the initiator holds
+  IK_A's private key). The client therefore requires
+  `cert.sender_identity == initial.initiator_identity`.
+- **TOFU pinning:** the client records each contact's identity on first sighting
+  (directory fetch or first inbound prekey message) and **refuses** a later
+  mismatch — blocking a malicious relay from forging a certificate to impersonate
+  or to reset/hijack a known contact's session. Continuous detection still needs a
+  key-transparency log (future work).
+
+## Known limitations / open items
+
+- **Relay is the certificate authority.** A fully malicious relay can mint certs
+  for *new* (not-yet-pinned) usernames. Real fix: key transparency + separate/
+  blinded issuer. TOFU mitigates this for established contacts only.
+- **Mailbox fetch** is not yet authenticated/ACK-based — a stable mailbox id
+  derived from the recipient DH key can be drained by anyone who knows it. Fix in
+  progress: identity-authenticated fetch + fetch-with-receipt deletion.
+- **One reusable ML-KEM prekey**, not one-time PQ prekeys + last-resort (strict
+  PQXDH). So the "recovering RK requires breaking X25519 *and* ML-KEM" claim holds
+  only while the KEM prekey secret is uncompromised; compromise of that one secret
+  removes the PQ leg for sessions that used it. One-time KEM prekeys are planned.
+- Single device per identity; no multi-device fan-out.
+- Client store is plaintext JSON (Argon2id encryption-at-rest planned).
 - The composed protocol is **unaudited**.
