@@ -11,17 +11,24 @@ logic lives in Swift.** The core is exposed via UniFFI (`crates/logos-ffi`).
 - `scripts/build-ios.sh` — **macOS-only**: builds `LogosKit.xcframework` (device +
   simulator slices) and regenerates the Swift bindings into `ios/bindings/`
   (gitignored — they're build artifacts).
-- `ios/LogosApp/` *(next)* — the SwiftUI app (XcodeGen `project.yml`, CI-buildable)
-  depending on the `LogosKit` package.
+- `ios/LogosKit/` — SwiftPM package. `Package.swift` (committed) + a committed
+  `Sources/LogosKit/LogosKit.swift`; the generated binding
+  (`Sources/LogosKit/Generated/logos_ffi.swift`) and `LogosFFI.xcframework` are
+  produced by the build script (gitignored).
+- `ios/LogosApp/` — the SwiftUI app: `project.yml` (XcodeGen) + `Sources/`
+  (Onboarding → Conversations → Chat → Settings; polling `recv()` off-main).
+  Depends on the local `LogosKit` package.
 
-## Build (on macOS / CI)
+## Build & run (on macOS)
 
 ```sh
-./scripts/build-ios.sh        # → target/ios/LogosKit.xcframework + ios/bindings/
+./scripts/build-ios.sh          # builds LogosKit.xcframework + Swift bindings
+cd ios/LogosApp && xcodegen     # generates LogosApp.xcodeproj
+open LogosApp.xcodeproj         # build/run in Xcode (point Relay URL at the deployed relay)
 ```
 
-The generated `ios/bindings/logos_ffi.swift` is added as a source in the `LogosKit`
-Swift package; the xcframework is its binary target.
+The generated `logos_ffi.swift` becomes a source in `LogosKit`; the xcframework is
+its binary target.
 
 ## Swift API (generated)
 

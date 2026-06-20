@@ -1,0 +1,31 @@
+name: LogosApp
+options:
+  bundleIdPrefix: com.colecantcode
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+packages:
+  LogosKit:
+    path: ../LogosKit
+targets:
+  LogosApp:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    dependencies:
+      - package: LogosKit
+        product: LogosKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.colecantcode.logos
+        PRODUCT_NAME: Logos
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: 1
+        GENERATE_INFOPLIST_FILE: true
+        INFOPLIST_KEY_CFBundleDisplayName: Logos
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: true
+        INFOPLIST_KEY_UILaunchScreen_Generation: true
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait"
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.9"

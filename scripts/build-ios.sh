@@ -8,8 +8,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 LIB=logos_ffi
-OUT=ios/bindings
-XCF=target/ios/LogosKit.xcframework
+OUT=ios/LogosKit/Sources/LogosKit/Generated
+XCF=ios/LogosKit/LogosFFI.xcframework
 
 # 1. Swift bindings (interface-only; generated from a host build — platform-independent).
 cargo build -p logos-ffi --release
@@ -43,4 +43,4 @@ xcodebuild -create-xcframework \
   -output "$XCF"
 
 echo "Built $XCF and Swift bindings in $OUT/"
-echo "Add $OUT/${LIB}.swift to the LogosKit Swift package and link the xcframework."
+echo "LogosKit Swift package is ready — open ios/LogosApp in Xcode (or xcodegen)."
