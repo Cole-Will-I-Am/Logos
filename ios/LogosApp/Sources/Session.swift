@@ -48,7 +48,7 @@ final class Session: ObservableObject {
         // Create Application Support up front — `create()/save()` ENOENTs on first run otherwise.
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         storePath = dir.appendingPathComponent("logos-store.json").path
-        relayURL = UserDefaults.standard.string(forKey: "relayURL") ?? "http://127.0.0.1:8787"
+        relayURL = UserDefaults.standard.string(forKey: "relayURL") ?? "https://relay.manticthink.com"
         loadIfExists()
     }
 

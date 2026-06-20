@@ -1,0 +1,176 @@
+name: iOS — TestFlight Release
+
+# Builds and uploads the Logos iOS app to TestFlight from a hosted macOS runner.
+# No local Mac required: signing and upload both use an App Store Connect API key,
+# so Xcode creates a cloud-managed distribution certificate automatically.
+#
+# Unlike a pure-Swift app, Logos first builds the Rust core into LogosKit's
+# xcframework + Swift bindings (scripts/build-ios.sh) before generating the Xcode
+# project — no crypto/protocol logic lives in Swift.
+#
+# Trigger manually: Actions tab → "iOS — TestFlight Release" → Run workflow.
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   ASC_KEY_ID         App Store Connect API key ID
+#   ASC_ISSUER_ID      App Store Connect API issuer ID
+#   ASC_KEY_P8_BASE64  The .p8 key file, base64-encoded
+# The Apple Team ID is baked in below (it isn't secret); set an APPLE_TEAM_ID
+# repo secret only to override it. See docs/CI_TESTFLIGHT_SETUP.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "Upload to TestFlight after building"
+        type: boolean
+        default: true
+
+concurrency:
+  group: ios-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      # Team ID is not secret (it ships inside every build); baked in as a default,
+      # overridable with a repo secret of the same name.
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || 'B3DB33R8JN' }}
+      ARCHIVE_PATH: ${{ github.workspace }}/build/Logos.xcarchive
+      EXPORT_PATH: ${{ github.workspace }}/build/export
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Sanity-check required secrets
+        run: |
+          set -euo pipefail
+          missing=0
+          for v in ASC_KEY_ID ASC_ISSUER_ID APPLE_TEAM_ID; do
+            if [ -z "${!v:-}" ]; then echo "::error::Missing secret $v"; missing=1; fi
+          done
+          if [ -z "${{ secrets.ASC_KEY_P8_BASE64 }}" ]; then
+            echo "::error::Missing secret ASC_KEY_P8_BASE64"; missing=1
+          fi
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Install Rust toolchain (iOS targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
+
+      - name: Build LogosKit.xcframework + Swift bindings (Rust core)
+        run: ./scripts/build-ios.sh
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project (XcodeGen)
+        working-directory: ios/LogosApp
+        run: xcodegen generate
+
+      - name: Install App Store Connect API key
+        env:
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          echo "$ASC_KEY_P8_BASE64" | base64 --decode \
+            > "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          chmod 600 "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+
+      - name: Resolve Swift package dependencies
+        working-directory: ios/LogosApp
+        run: xcodebuild -resolvePackageDependencies -project LogosApp.xcodeproj -scheme LogosApp
+
+      # Each archive on a fresh runner mints a new cloud-managed Apple Development
+      # cert; they accumulate until the account hits the certificate cap and the
+      # archive fails. Revoke stale Development certs first (best-effort; never
+      # touches Distribution/TestFlight certs and never fails the build).
+      - name: Free up signing certificates
+        continue-on-error: true
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+        run: node scripts/revoke_dev_certs.mjs
+
+      - name: Archive
+        working-directory: ios/LogosApp
+        run: |
+          set -euo pipefail
+          xcodebuild archive \
+            -project LogosApp.xcodeproj \
+            -scheme LogosApp \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$ARCHIVE_PATH" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
+
+      - name: Export signed IPA
+        run: |
+          set -euo pipefail
+          {
+            echo '<?xml version="1.0" encoding="UTF-8"?>'
+            echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+            echo '<plist version="1.0">'
+            echo '<dict>'
+            echo '  <key>method</key><string>app-store</string>'
+            echo '  <key>destination</key><string>export</string>'
+            echo '  <key>signingStyle</key><string>automatic</string>'
+            echo "  <key>teamID</key><string>${APPLE_TEAM_ID}</string>"
+            echo '  <key>uploadSymbols</key><true/>'
+            echo '  <key>manageAppVersionAndBuildNumber</key><false/>'
+            echo '</dict>'
+            echo '</plist>'
+          } > "$RUNNER_TEMP/ExportOptions.plist"
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportPath "$EXPORT_PATH" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+
+      - name: Upload .ipa as build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Logos-ipa
+          path: ${{ env.EXPORT_PATH }}/*.ipa
+          if-no-files-found: error
+
+      - name: Upload to TestFlight
+        if: ${{ inputs.upload }}
+        run: |
+          set -euo pipefail
+          IPA=$(ls "$EXPORT_PATH"/*.ipa | head -n1)
+          echo "Uploading $IPA to App Store Connect…"
+          # altool can exit 0 even when delivery fails, so capture output and fail
+          # explicitly on any error string.
+          set +e
+          OUT=$(xcrun altool --upload-app -f "$IPA" -t ios \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID" 2>&1)
+          CODE=$?
+          echo "$OUT"
+          if [ "$CODE" -ne 0 ] || echo "$OUT" | grep -qiE 'UPLOAD FAILED|ERROR ITMS|Validation failed|VALIDATION_ERROR'; then
+            echo "::error::altool upload failed"
+            exit 1
+          fi
+          echo "Upload submitted. The build will appear in TestFlight after Apple finishes processing."

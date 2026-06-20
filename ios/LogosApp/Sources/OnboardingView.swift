@@ -3,7 +3,7 @@ import SwiftUI
 struct OnboardingView: View {
     @EnvironmentObject var session: Session
     @State private var username = ""
-    @State private var relay = "http://127.0.0.1:8787"
+    @State private var relay = "https://relay.manticthink.com"
     @State private var showAdvanced = false
     @State private var showHow = false
     @FocusState private var nameFocused: Bool
