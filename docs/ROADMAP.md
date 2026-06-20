@@ -11,7 +11,7 @@ the **whole** program in view while we build it phase by phase. Status legend:
 | **P0 — Crypto core** | identity (Ed25519+X25519+ML-KEM-1024 prekeys), PQXDH hybrid handshake, Double Ratchet (FS+PCS), sealed sender | ✅ |
 | **P1 — Relay + client + CLI** | minimal-trust axum relay (auth'd + ACK'd mailbox, KEM-prekey pool), sync FFI-friendly client, `logos` CLI, end-to-end tests | ✅ |
 | **P1.5 — Security-review hardening** | transactional decrypt, cert↔identity binding + TOFU, one-time ML-KEM, domain-separated sigs, panic removal, persisted server key | ✅ |
-| **P2 — iOS app** | `logos-ffi` (UniFFI) → `LogosKit.xcframework` → SwiftUI app; deploy the relay | 🔜 |
+| **P2 — iOS app** | `logos-ffi` (UniFFI) ✅ → `LogosKit.xcframework` + SwiftUI app (source ✅, CI build validating) → deploy relay (localhost ✅, public TLS pending) → TestFlight (needs signing) | 🚧 |
 | **P3 — Key transparency** | append-only verifiable log of identity keys + client auditing/gossip (the real fix for relay-as-cert-authority; upgrades TOFU) | ⏳ |
 | **P4 — Groups (MLS)** | `openmls` group messaging | ⏳ |
 | **P5 — Advanced privacy** | onion/mixnet transport, blinded/rotating mailbox ids, PSI contact discovery, multi-device | ⏳ |
@@ -21,6 +21,16 @@ the **whole** program in view while we build it phase by phase. Status legend:
 Open non-blocking review items folded into the phases above: F-08 (rate limits →
 hardening), F-12 (full zeroization → hardening), blinded mailbox (→ P5), F-02
 endgame (→ P3).
+
+### P2 status (in progress)
+
+- ✅ `logos-ffi` (UniFFI) — compiles + FFI smoke test + Swift binding generation, all verified on Linux.
+- ✅ `LogosKit` SwiftPM package + SwiftUI app source (`ios/LogosApp`) — authored; not yet compiled locally (no Mac here).
+- ✅ Relay deployed on the VPS as `logos-relay.service` (systemd) — **localhost-only** for now.
+- ✅ CI workflow (`.github/workflows/ios.yml`) — Linux Rust checks + macOS xcframework + Simulator app build.
+- 🚧 **Green CI build** — validating the Swift on a macOS runner. (Account spending limit blocks private-repo Actions, so builds run via the flip-public pattern; revert to private after each run.)
+- ⬜ **Public TLS relay endpoint** so a device can connect (currently localhost).
+- ⬜ **TestFlight / device build** — needs an Apple developer account + signing secrets.
 
 ---
 

@@ -56,11 +56,19 @@ cargo run -p logos-cli -- --store bob.json   recv             # -> alice: hello 
 
 ## iOS app (the target client)
 
-The `logos-client` engine is deliberately **synchronous with plain types**
-(strings/bytes), so it can be wrapped for Swift with **UniFFI** and shipped as an
-**xcframework** the iOS app links against — no async crossing the FFI boundary.
-The relay stays server-side Rust. Building the UniFFI binding + a SwiftUI app is
-the next milestone (`logos-ffi` crate → `LogosKit.xcframework`).
+The `logos-client` engine is **synchronous with plain types**, so it's wrapped for
+Swift with **UniFFI** (`crates/logos-ffi`) and shipped as an **xcframework** — no
+async crossing the FFI boundary; the relay stays server-side Rust.
+
+- `crates/logos-ffi` — UniFFI wrapper (`LogosClient` / `IncomingMessage` /
+  `LogosError`); compiles + Swift bindings generate on Linux (✅ verified).
+- `ios/LogosKit` — SwiftPM package over the generated binding + xcframework.
+- `ios/LogosApp` — SwiftUI app (onboarding → conversations → chat → settings).
+- `scripts/build-ios.sh` + `.github/workflows/ios.yml` — build the xcframework and
+  compile the app on a macOS CI runner (no local Mac needed).
+
+See [`ios/README.md`](ios/README.md). Status is tracked in
+[`docs/ROADMAP.md`](docs/ROADMAP.md) (P2).
 
 > Note on reproducible builds: per the design blueprint, App Store binaries can't
 > be bit-for-bit reproduced (Apple re-signs/encrypts), so iOS will lean on the
