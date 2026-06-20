@@ -17,8 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Toolchain
-        run: rustup toolchain install stable --profile minimal --component clippy rustfmt
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo fmt --check
@@ -27,14 +28,12 @@ jobs:
   # No code signing required for a simulator build, so this validates that the
   # whole iOS surface compiles without an Apple account.
   ios:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Rust toolchain + iOS targets
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
       - name: Build LogosKit.xcframework + Swift bindings
         run: ./scripts/build-ios.sh
       - name: Install XcodeGen
