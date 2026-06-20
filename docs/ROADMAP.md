@@ -4,6 +4,33 @@ Logos implements the "Sealed" ultra-secure-messenger blueprint. This file keeps
 the **whole** program in view while we build it phase by phase. Status legend:
 ✅ done · 🔜 next · ⏳ planned · 🔒 gate.
 
+## ▶︎ Resuming — immediate next steps (paused here)
+
+Picked up in this order when work resumes:
+
+1. **Public TLS relay endpoint** *(finish P2 — needed before a device can connect)*.
+   The relay runs as systemd `logos-relay.service` on the VPS at `127.0.0.1:8787`
+   (binary `/srv/logos/logos-server`, key `/srv/logos/logos-server-key`). Expose it
+   over HTTPS at a stable hostname — **decision needed:** a dedicated domain +
+   reverse proxy (nginx/caddy) **or** a Cloudflare tunnel. Then point the iOS app's
+   default relay URL at it.
+2. **TestFlight / device build** *(finish P2)*. CI currently does an unsigned
+   Simulator build only. A signed device/TestFlight build **needs an Apple developer
+   account + signing secrets** (ASC API key, etc.) wired into `.github/workflows/ios.yml`
+   — mirror the SEER pipeline.
+3. **P3 — Key transparency** *(headline security phase; do before any public/"trust
+   us" positioning)*. Append-only verifiable log of identity keys + client auditing/
+   gossip. Removes the relay as identity authority (the F-02 endgame) and upgrades
+   the current TOFU pinning to continuous verification.
+
+Cross-cutting hardening (any time, non-blocking): redb relay persistence + TTL,
+Argon2id client-store encryption, prekey-fetch rate limits (F-08), full zeroization
+(F-12). Then later phases P4 (MLS groups) / P5 (mixnet, blinded mailbox, PSI).
+
+**CI note:** private-repo Actions are blocked by a GitHub account spending limit, so
+each build runs via flip-public → run → revert-private. Build locally-equivalent
+with `cargo test --workspace`; the iOS build is `gh workflow run build` (while public).
+
 ## Where we are
 
 | Phase | Scope | Status |
