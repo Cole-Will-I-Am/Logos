@@ -1,5 +1,7 @@
 # Logos
 
+<p align="center"><img src="brand/logos-wordmark.png" alt="Logos" width="280"></p>
+
 > ## ⚠️ EXPERIMENTAL — UNAUDITED. DO NOT USE FOR REAL SECRETS.
 > Logos is a research implementation of an end-to-end-encrypted messenger. Its
 > cryptographic protocol is **assembled from audited primitives but has not
