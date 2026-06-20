@@ -116,13 +116,18 @@ the known server key and checks expiry before trusting the sender identity.
 - **Relay is the certificate authority.** A fully malicious relay can mint certs
   for *new* (not-yet-pinned) usernames. Real fix: key transparency + separate/
   blinded issuer. TOFU mitigates this for established contacts only.
-- **Mailbox fetch** is not yet authenticated/ACK-based — a stable mailbox id
-  derived from the recipient DH key can be drained by anyone who knows it. Fix in
-  progress: identity-authenticated fetch + fetch-with-receipt deletion.
-- **One reusable ML-KEM prekey**, not one-time PQ prekeys + last-resort (strict
-  PQXDH). So the "recovering RK requires breaking X25519 *and* ML-KEM" claim holds
-  only while the KEM prekey secret is uncompromised; compromise of that one secret
-  removes the PQ leg for sessions that used it. One-time KEM prekeys are planned.
+- **Mailbox fetch is authenticated + ACK-based** (F-04/F-07): `/v1/fetch` and
+  `/v1/ack` require an identity-key signature, the server derives the mailbox from
+  the proven identity (only the owner can read), and envelopes are deleted only
+  when the client ACKs them after durable processing. (Mailbox ids are still
+  *stable* — derived from the recipient DH key — so blinded/rotating ids remain
+  future work, but they can no longer be read or drained without the private key.)
+- **One-time ML-KEM prekeys + last-resort** (F-05): each handshake consumes a
+  one-time signed ML-KEM prekey (deleted after use); a reusable last-resort prekey
+  is used only when the pool is depleted. So the "breaking both X25519 *and*
+  ML-KEM" property holds with PQ forward secrecy for one-time-prekey sessions;
+  only sessions that fell back to the last-resort key share its longer-lived
+  secret (until it is rotated).
 - Single device per identity; no multi-device fan-out.
 - Client store is plaintext JSON (Argon2id encryption-at-rest planned).
 - The composed protocol is **unaudited**.

@@ -17,7 +17,10 @@ pub struct RegisterRequest {
     pub username: String,
     pub identity: IdentityPublic,
     pub signed_prekey: SignedPreKeyPublic,
-    pub kem_prekey: KemPreKeyPublic,
+    /// Pool of one-time ML-KEM prekeys (consumed one-per-handshake) (F-05).
+    pub kem_prekeys: Vec<KemPreKeyPublic>,
+    /// Reusable last-resort ML-KEM prekey, used only when the one-time pool is empty.
+    pub last_resort_kem_prekey: KemPreKeyPublic,
     pub one_time_prekeys: Vec<OneTimePreKeyPublic>,
     /// Identity signature over `registration_signed_bytes`, proving key control.
     pub registration_sig: Vec<u8>,
@@ -76,16 +79,55 @@ pub enum OuterMessage {
     Normal { ratchet: RatchetMessage },
 }
 
-/// POST /v1/mailbox/:id — enqueue an opaque sealed envelope.
+/// POST /v1/mailbox/:id — enqueue an opaque sealed envelope (sender→relay).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PostEnvelope {
     pub envelope: SealedEnvelope,
 }
 
-/// GET /v1/mailbox/:id — fetch + delete queued envelopes (delete-on-deliver).
+/// A queued envelope with a server-assigned id (for ACK-based deletion).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct StoredEnvelope {
+    pub id: u64,
+    pub envelope: SealedEnvelope,
+}
+
+/// POST /v1/fetch — authenticated mailbox read (does NOT delete). The server
+/// derives the mailbox from the proven identity, so only the identity-key holder
+/// can read it (F-04). `sig` is over `fetch_signed_bytes`.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FetchRequest {
+    pub identity: IdentityPublic,
+    pub sig: Vec<u8>,
+}
+
+pub fn fetch_signed_bytes(identity: &IdentityPublic) -> Vec<u8> {
+    let mut v = b"LogosFetchv1".to_vec();
+    v.extend_from_slice(&identity.encode());
+    v
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FetchResponse {
-    pub envelopes: Vec<SealedEnvelope>,
+    pub envelopes: Vec<StoredEnvelope>,
+}
+
+/// POST /v1/ack — authenticated delete of specific envelope ids, only after the
+/// client has durably processed them (F-07). `sig` is over `ack_signed_bytes`.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AckRequest {
+    pub identity: IdentityPublic,
+    pub ids: Vec<u64>,
+    pub sig: Vec<u8>,
+}
+
+pub fn ack_signed_bytes(identity: &IdentityPublic, ids: &[u64]) -> Vec<u8> {
+    let mut v = b"LogosAckv1".to_vec();
+    v.extend_from_slice(&identity.encode());
+    for id in ids {
+        v.extend_from_slice(&id.to_be_bytes());
+    }
+    v
 }
 
 /// Opaque, stable per-recipient mailbox id derived from the recipient's identity

@@ -21,23 +21,27 @@ use logos_identity::{
     verify, IdentityPublic, KemPreKeyPublic, OneTimePreKeyPublic, PreKeyBundle, SignedPreKeyPublic,
 };
 use logos_proto::{
-    cert_signed_bytes, registration_signed_bytes, CertRequest, CertResponse, DirectoryResponse,
-    FetchResponse, PostEnvelope, RegisterRequest, ServerKeyResponse,
+    ack_signed_bytes, cert_signed_bytes, fetch_signed_bytes, mailbox_id, registration_signed_bytes,
+    AckRequest, CertRequest, CertResponse, DirectoryResponse, FetchRequest, FetchResponse,
+    PostEnvelope, RegisterRequest, ServerKeyResponse, StoredEnvelope,
 };
-use logos_sealed::{issue_certificate, SealedEnvelope};
+use logos_sealed::issue_certificate;
 
 const CERT_TTL_SECS: u64 = 24 * 60 * 60;
 
 struct DirEntry {
     identity: IdentityPublic,
     signed_prekey: SignedPreKeyPublic,
-    kem_prekey: KemPreKeyPublic,
+    /// One-time ML-KEM prekeys (consumed per handshake), with a reusable fallback.
+    kem_one_time: VecDeque<KemPreKeyPublic>,
+    last_resort_kem: KemPreKeyPublic,
     one_time: VecDeque<OneTimePreKeyPublic>,
 }
 
 struct Inner {
     directory: HashMap<String, DirEntry>,
-    mailboxes: HashMap<String, Vec<SealedEnvelope>>,
+    mailboxes: HashMap<String, Vec<StoredEnvelope>>,
+    next_id: u64,
     server_seed: [u8; 32],
     server_vk: [u8; 32],
 }
@@ -50,6 +54,7 @@ fn state_from_seed(seed: [u8; 32]) -> AppState {
     AppState(Arc::new(Mutex::new(Inner {
         directory: HashMap::new(),
         mailboxes: HashMap::new(),
+        next_id: 0,
         server_seed: signing.to_bytes(),
         server_vk: signing.verifying_key().to_bytes(),
     })))
@@ -80,7 +85,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/directory/{username}", get(directory))
         .route("/v1/cert", post(cert))
         .route("/v1/server-key", get(server_key))
-        .route("/v1/mailbox/{id}", post(post_mailbox).get(get_mailbox))
+        .route("/v1/mailbox/{id}", post(post_mailbox))
+        .route("/v1/fetch", post(fetch))
+        .route("/v1/ack", post(ack))
         .with_state(state)
 }
 
@@ -116,7 +123,8 @@ async fn register(
         DirEntry {
             identity: req.identity,
             signed_prekey: req.signed_prekey,
-            kem_prekey: req.kem_prekey,
+            kem_one_time: req.kem_prekeys.into_iter().collect(),
+            last_resort_kem: req.last_resort_kem_prekey,
             one_time: req.one_time_prekeys.into_iter().collect(),
         },
     );
@@ -133,12 +141,17 @@ async fn directory(
         .get_mut(&username)
         .ok_or((StatusCode::NOT_FOUND, "unknown user".into()))?;
     let one_time_prekey = entry.one_time.pop_front();
+    // Consume a one-time ML-KEM prekey if available, else fall back to last-resort (F-05).
+    let kem_prekey = entry
+        .kem_one_time
+        .pop_front()
+        .unwrap_or_else(|| entry.last_resort_kem.clone());
     let bundle = PreKeyBundle {
         username: username.clone(),
         identity: entry.identity,
         signed_prekey: entry.signed_prekey.clone(),
         one_time_prekey,
-        kem_prekey: entry.kem_prekey.clone(),
+        kem_prekey,
     };
     Ok(Json(DirectoryResponse { bundle }))
 }
@@ -182,15 +195,48 @@ async fn post_mailbox(
     Json(req): Json<PostEnvelope>,
 ) -> StatusCode {
     let mut inner = state.0.lock().unwrap();
-    inner.mailboxes.entry(id).or_default().push(req.envelope);
+    let msg_id = inner.next_id;
+    inner.next_id += 1;
+    inner.mailboxes.entry(id).or_default().push(StoredEnvelope {
+        id: msg_id,
+        envelope: req.envelope,
+    });
     StatusCode::OK
 }
 
-async fn get_mailbox(State(state): State<AppState>, Path(id): Path<String>) -> Json<FetchResponse> {
+/// Authenticated read (F-04): the caller proves control of the identity key, and
+/// the server derives the mailbox from it — so only the owner can read. Does NOT
+/// delete (F-07); the client deletes via /v1/ack after durably processing.
+async fn fetch(
+    State(state): State<AppState>,
+    Json(req): Json<FetchRequest>,
+) -> Result<Json<FetchResponse>, ApiError> {
+    verify(&req.identity, &fetch_signed_bytes(&req.identity), &req.sig)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "bad fetch signature".into()))?;
+    let mb = mailbox_id(&req.identity.dh);
+    let inner = state.0.lock().unwrap();
+    let envelopes = inner.mailboxes.get(&mb).cloned().unwrap_or_default();
+    Ok(Json(FetchResponse { envelopes }))
+}
+
+/// Authenticated delete of specific envelope ids (F-07), only after the client
+/// has durably processed them.
+async fn ack(
+    State(state): State<AppState>,
+    Json(req): Json<AckRequest>,
+) -> Result<StatusCode, ApiError> {
+    verify(
+        &req.identity,
+        &ack_signed_bytes(&req.identity, &req.ids),
+        &req.sig,
+    )
+    .map_err(|_| (StatusCode::UNAUTHORIZED, "bad ack signature".into()))?;
+    let mb = mailbox_id(&req.identity.dh);
     let mut inner = state.0.lock().unwrap();
-    // delete-on-deliver: hand back everything queued and clear it.
-    let envelopes = inner.mailboxes.remove(&id).unwrap_or_default();
-    Json(FetchResponse { envelopes })
+    if let Some(q) = inner.mailboxes.get_mut(&mb) {
+        q.retain(|e| !req.ids.contains(&e.id));
+    }
+    Ok(StatusCode::OK)
 }
 
 /// Run the relay on `addr` until the process exits, persisting the signing key

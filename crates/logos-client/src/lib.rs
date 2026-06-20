@@ -15,15 +15,18 @@ use logos_identity::{
 };
 use logos_pqxdh::{initiate, respond, InitialMessage};
 use logos_proto::{
-    cert_signed_bytes, mailbox_id, registration_signed_bytes, CertRequest, CertResponse,
-    DirectoryResponse, FetchResponse, OuterMessage, PostEnvelope, RegisterRequest,
-    ServerKeyResponse,
+    ack_signed_bytes, cert_signed_bytes, fetch_signed_bytes, mailbox_id, registration_signed_bytes,
+    AckRequest, CertRequest, CertResponse, DirectoryResponse, FetchRequest, FetchResponse,
+    OuterMessage, PostEnvelope, RegisterRequest, ServerKeyResponse,
 };
 use logos_ratchet::RatchetState;
 use logos_sealed::{seal, unseal, SealedEnvelope, SenderCertificate};
 use serde::{Deserialize, Serialize};
 
 const ONE_TIME_PREKEY_COUNT: u32 = 20;
+const KEM_PREKEY_COUNT: u32 = 10;
+/// Reserved id for the reusable last-resort ML-KEM prekey (one-time ids start at 1).
+const LAST_RESORT_KEM_ID: u32 = 0;
 
 #[derive(Debug, thiserror::Error)]
 #[error("logos-client: {0}")]
@@ -48,6 +51,13 @@ struct OtkSecret {
     secret: [u8; 32],
 }
 
+/// A stored ML-KEM prekey secret (one-time or last-resort) (F-05).
+#[derive(Serialize, Deserialize)]
+struct KemSecretRec {
+    id: u32,
+    secret: Vec<u8>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Session {
     ratchet: RatchetState,
@@ -65,8 +75,8 @@ struct Store {
     identity_secret: Vec<u8>,
     signed_prekey_id: u32,
     signed_prekey_secret: [u8; 32],
-    kem_prekey_id: u32,
-    kem_prekey_secret: Vec<u8>,
+    kem_one_time: Vec<KemSecretRec>,
+    kem_last_resort: KemSecretRec,
     one_time: Vec<OtkSecret>,
     sessions: HashMap<String, Session>,
     /// TOFU-pinned identity per username (F-02/F-03): detects/blocks a relay
@@ -95,7 +105,6 @@ impl Client {
     pub fn create(path: impl AsRef<Path>, server_url: &str, username: &str) -> Result<Self> {
         let identity = IdentityKeyPair::generate();
         let (spk_pub, spk_sec) = new_signed_prekey(1, &identity);
-        let (kpk_pub, kpk_sec) = new_kem_prekey(1, &identity);
         let mut otk_pub = Vec::new();
         let mut otk_sec = Vec::new();
         for id in 1..=ONE_TIME_PREKEY_COUNT {
@@ -107,12 +116,30 @@ impl Client {
             });
         }
 
+        // One-time ML-KEM prekeys (ids 1..) + a reusable last-resort (id 0) (F-05).
+        let mut kem_pub = Vec::new();
+        let mut kem_one_time = Vec::new();
+        for id in 1..=KEM_PREKEY_COUNT {
+            let (p, s) = new_kem_prekey(id, &identity);
+            kem_pub.push(p);
+            kem_one_time.push(KemSecretRec {
+                id,
+                secret: s.secret.to_bytes(),
+            });
+        }
+        let (last_resort_pub, last_resort_sec) = new_kem_prekey(LAST_RESORT_KEM_ID, &identity);
+        let kem_last_resort = KemSecretRec {
+            id: LAST_RESORT_KEM_ID,
+            secret: last_resort_sec.secret.to_bytes(),
+        };
+
         let reg_sig = identity.sign(&registration_signed_bytes(username, &identity.public()));
         let req = RegisterRequest {
             username: username.to_string(),
             identity: identity.public(),
             signed_prekey: spk_pub,
-            kem_prekey: kpk_pub,
+            kem_prekeys: kem_pub,
+            last_resort_kem_prekey: last_resort_pub,
             one_time_prekeys: otk_pub,
             registration_sig: reg_sig.to_vec(),
         };
@@ -137,8 +164,8 @@ impl Client {
             identity_secret: identity.to_secret_bytes().to_vec(),
             signed_prekey_id: 1,
             signed_prekey_secret: spk_sec.secret.to_bytes(),
-            kem_prekey_id: 1,
-            kem_prekey_secret: kpk_sec.secret.to_bytes(),
+            kem_one_time,
+            kem_last_resort,
             one_time: otk_sec,
             sessions: HashMap::new(),
             contacts: HashMap::new(),
@@ -294,11 +321,21 @@ impl Client {
     }
 
     /// Fetch, decrypt, and return all pending messages.
+    ///
+    /// Fetch is authenticated by the identity key and does not delete (F-04);
+    /// envelopes are processed independently and only those that succeed are
+    /// ACKed (deleted) on the server (F-07).
     pub fn recv(&mut self) -> Result<Vec<Incoming>> {
-        let id = self.mailbox();
+        let identity = self.identity();
+        let id_pub = identity.public();
+        let fetch_sig = identity.sign(&fetch_signed_bytes(&id_pub)).to_vec();
         let resp: FetchResponse = self
             .http
-            .get(format!("{}/v1/mailbox/{id}", self.server_url))
+            .post(format!("{}/v1/fetch", self.server_url))
+            .json(&FetchRequest {
+                identity: id_pub,
+                sig: fetch_sig,
+            })
             .send()
             .map_err(err)?
             .error_for_status()
@@ -312,15 +349,32 @@ impl Client {
             .ok_or_else(|| ClientError("no server key".into()))?;
         let dh_priv = self.identity_dh_priv();
         let mut out = Vec::new();
+        let mut acked: Vec<u64> = Vec::new();
 
-        // F-07: process each envelope independently; a malformed/undecryptable one
-        // is quarantined (skipped) rather than failing the whole batch.
-        for env in resp.envelopes {
-            if let Ok(inc) = self.process_envelope(&env, &server_vk, &dh_priv) {
+        for stored in resp.envelopes {
+            // A malformed/undecryptable envelope is quarantined: left on the
+            // server (not ACKed) rather than failing the whole batch.
+            if let Ok(inc) = self.process_envelope(&stored.envelope, &server_vk, &dh_priv) {
                 out.push(inc);
+                acked.push(stored.id);
             }
         }
         self.save()?;
+
+        if !acked.is_empty() {
+            let ack_sig = identity.sign(&ack_signed_bytes(&id_pub, &acked)).to_vec();
+            self.http
+                .post(format!("{}/v1/ack", self.server_url))
+                .json(&AckRequest {
+                    identity: id_pub,
+                    ids: acked,
+                    sig: ack_sig,
+                })
+                .send()
+                .map_err(err)?
+                .error_for_status()
+                .map_err(err)?;
+        }
         Ok(out)
     }
 
@@ -387,9 +441,6 @@ impl Client {
         if initial.signed_prekey_id != self.store.signed_prekey_id {
             return Err(ClientError("unknown signed prekey id".into()));
         }
-        if initial.kem_prekey_id != self.store.kem_prekey_id {
-            return Err(ClientError("unknown kem prekey id".into()));
-        }
         let one_time_priv = match initial.one_time_prekey_id {
             Some(otk_id) => {
                 let pos = self
@@ -402,7 +453,19 @@ impl Client {
             }
             None => None,
         };
-        let kem_secret = KemSecret::from_bytes(&self.store.kem_prekey_secret).map_err(err)?;
+        // Resolve the ML-KEM prekey the initiator chose: the reusable last-resort
+        // (kept), or a one-time prekey (consumed after use) (F-05).
+        let kem_secret = if initial.kem_prekey_id == self.store.kem_last_resort.id {
+            KemSecret::from_bytes(&self.store.kem_last_resort.secret).map_err(err)?
+        } else {
+            let pos = self
+                .store
+                .kem_one_time
+                .iter()
+                .position(|k| k.id == initial.kem_prekey_id)
+                .ok_or_else(|| ClientError("unknown kem prekey id".into()))?;
+            KemSecret::from_bytes(&self.store.kem_one_time.remove(pos).secret).map_err(err)?
+        };
         let resp = respond(
             &self.identity(),
             self.store.signed_prekey_secret,

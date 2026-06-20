@@ -67,3 +67,22 @@ fn two_clients_exchange_messages_through_relay() {
     let got = bob2.recv().unwrap();
     assert_eq!(got[0].text, "after reload");
 }
+
+#[test]
+fn other_identity_cannot_read_or_drain_mailbox() {
+    let url = start_relay();
+    let mut alice = Client::create(tmp("a2"), &url, "alice2").unwrap();
+    let mut bob = Client::create(tmp("b2"), &url, "bob2").unwrap();
+    let mut eve = Client::create(tmp("e2"), &url, "eve2").unwrap();
+
+    alice.send("bob2", "for bob only").unwrap();
+
+    // F-04: fetch is bound to the caller's identity key — Eve only ever reads her
+    // own (empty) mailbox and cannot drain Bob's.
+    assert!(eve.recv().unwrap().is_empty());
+
+    // F-07: Bob's message survived (ACK-based deletion) and is delivered to Bob.
+    let got = bob.recv().unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].text, "for bob only");
+}
