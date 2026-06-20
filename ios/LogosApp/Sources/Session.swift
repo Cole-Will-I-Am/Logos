@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import LogosKit
 
 /// Delivery state of an outbound message. Drives the bubble status row.
@@ -39,19 +40,51 @@ final class Session: ObservableObject {
     @Published var relayURL: String
     @Published var lastError: String?
 
+    /// The default public relay. Identities/history on this relay keep the original
+    /// unsuffixed filenames so existing installs aren't orphaned by per-relay stores.
+    static let defaultRelay = "https://relay.manticthink.com"
+
     private var client: LogosClient?
-    private let storePath: String
-    private let historyPath: String
+    private let dir: URL
     private var pollTask: Task<Void, Never>?
 
+    // Store + history are scoped to the active relay: each relay (network) keeps its
+    // own identity and chats, so switching networks is safe and reversible.
+    private var storePath: String { path(prefix: "logos-store") }
+    private var historyPath: String { path(prefix: "logos-history") }
+
+    private func path(prefix: String) -> String {
+        let name = relayURL == Self.defaultRelay ? "\(prefix).json"
+                                                 : "\(prefix)-\(Self.slug(relayURL)).json"
+        return dir.appendingPathComponent(name).path
+    }
+
+    private static func slug(_ s: String) -> String {
+        SHA256.hash(data: Data(s.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
     init() {
-        let dir = FileManager.default
+        dir = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         // Create Application Support up front — `create()/save()` ENOENTs on first run otherwise.
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        storePath = dir.appendingPathComponent("logos-store.json").path
-        historyPath = dir.appendingPathComponent("logos-history.json").path
-        relayURL = UserDefaults.standard.string(forKey: "relayURL") ?? "https://relay.manticthink.com"
+        relayURL = UserDefaults.standard.string(forKey: "relayURL") ?? Self.defaultRelay
+        loadHistory()
+        loadIfExists()
+    }
+
+    /// Switch the active relay (network). Each relay scopes its own identity + chats,
+    /// so this loads the identity registered on `newURL` if one exists, or drops to
+    /// onboarding to register on that network. No-op if unchanged.
+    func switchRelay(to newURL: String) {
+        let trimmed = newURL.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed != relayURL else { return }
+        pollTask?.cancel(); pollTask = nil
+        client = nil
+        username = nil; mailboxId = ""
+        conversations = []; messages = [:]; security = [:]; lastError = nil
+        relayURL = trimmed
+        UserDefaults.standard.set(trimmed, forKey: "relayURL")
         loadHistory()
         loadIfExists()
     }

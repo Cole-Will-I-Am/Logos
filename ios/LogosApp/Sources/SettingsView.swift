@@ -2,12 +2,16 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject var session: Session
+    @Environment(\.dismiss) private var dismiss
     @State private var copied = false
+    @State private var relayMode = 0       // 0 = public, 1 = private relay
+    @State private var privateURL = ""
 
     var body: some View {
         ScrollView {
             VStack(spacing: Space.lg) {
                 identityCard
+                networkSection
                 privacySection
                 aboutSection
             }
@@ -17,7 +21,64 @@ struct SettingsView: View {
         .logosBackground(watermark: true)
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            relayMode = session.relayURL == Session.defaultRelay ? 0 : 1
+            privateURL = relayMode == 1 ? session.relayURL : ""
+        }
     }
+
+    private var networkSection: some View {
+        VStack(alignment: .leading, spacing: Space.xs) {
+            Text("NETWORK").font(LFont.caption).fontWeight(.semibold)
+                .foregroundStyle(LColor.inkTertiary).tracking(0.6).padding(.leading, Space.xs)
+            VStack(alignment: .leading, spacing: Space.sm) {
+                Picker("Relay", selection: $relayMode) {
+                    Text("Public").tag(0)
+                    Text("Private relay").tag(1)
+                }
+                .pickerStyle(.segmented)
+
+                if relayMode == 1 {
+                    TextField("https://your-relay.ts.net", text: $privateURL)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .keyboardType(.URL)
+                        .font(LFont.footnote.monospaced())
+                        .padding(.horizontal, Space.sm).padding(.vertical, 10)
+                        .background(LColor.surfaceAlt)
+                        .clipShape(RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
+                    Text("Routes your messages through a relay you choose — e.g. a Logos server on your Tailscale network. You’ll only reach people registered on that same relay. It’s still relayed (not peer-to-peer), and traffic can still cross the internet when no direct path is available.")
+                        .font(LFont.caption).foregroundStyle(LColor.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Default Logos relay — \(hostOf(Session.defaultRelay)).")
+                        .font(LFont.caption).foregroundStyle(LColor.inkSecondary)
+                }
+
+                Button(action: applyNetwork) { Text("Apply").frame(maxWidth: .infinity) }
+                    .buttonStyle(.logosSecondary)
+                    .disabled(!networkChanged)
+
+                Label("Switching networks changes which relay your identity lives on — you may need to register on the new one.",
+                      systemImage: "info.circle")
+                    .font(LFont.caption).foregroundStyle(LColor.inkTertiary)
+                    .labelStyle(.titleAndIcon)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .cardStyle()
+        }
+    }
+
+    private var targetRelay: String {
+        relayMode == 0 ? Session.defaultRelay : privateURL.trimmingCharacters(in: .whitespaces)
+    }
+    private var networkChanged: Bool { !targetRelay.isEmpty && targetRelay != session.relayURL }
+    private func applyNetwork() {
+        guard networkChanged else { return }
+        Haptic.tap()
+        session.switchRelay(to: targetRelay)
+        dismiss()
+    }
+    private func hostOf(_ s: String) -> String { URL(string: s)?.host ?? s }
 
     private var identityCard: some View {
         VStack(spacing: Space.md) {
@@ -60,11 +121,6 @@ struct SettingsView: View {
             LBanner(tone: .caution, icon: "flask.fill",
                     title: "Experimental & unaudited",
                     message: "Logos hasn’t been independently security audited. Don’t use it for anything you genuinely need to keep secret.")
-
-            SettingsGroup(title: "Advanced") {
-                SettingsRow(icon: "antenna.radiowaves.left.and.right", title: "Relay",
-                            detail: session.relayURL, mono: true)
-            }
 
             Text("Logos · v\(appVersion)")
                 .font(LFont.caption).foregroundStyle(LColor.inkTertiary)

@@ -3,7 +3,7 @@ import SwiftUI
 struct OnboardingView: View {
     @EnvironmentObject var session: Session
     @State private var username = ""
-    @State private var relay = "https://relay.manticthink.com"
+    @State private var relay = ""
     @State private var showAdvanced = false
     @State private var showHow = false
     @FocusState private var nameFocused: Bool
@@ -85,6 +85,7 @@ struct OnboardingView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .logosBackground()
+        .onAppear { if relay.isEmpty { relay = session.relayURL } }
     }
 
     private var howItWorks: some View {
