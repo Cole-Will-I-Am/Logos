@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+# local client/server state produced at runtime
+*.logos
+/run
+*.redb
+.env

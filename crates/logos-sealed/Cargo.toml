@@ -1,0 +1,19 @@
+[package]
+name = "logos-sealed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+logos-identity.workspace = true
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+rand.workspace = true
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true

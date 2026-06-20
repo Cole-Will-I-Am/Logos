@@ -1,0 +1,19 @@
+[package]
+name = "logos-pqxdh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+logos-identity.workspace = true
+x25519-dalek.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+rand.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+logos-ratchet.workspace = true

@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+repository = "https://github.com/Cole-Will-I-Am/Logos"
+authors = ["Logos contributors"]
+
+[workspace.dependencies]
+# --- audited cryptographic primitives ---
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ml-kem = { version = "0.3", features = ["getrandom", "zeroize"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+subtle = "2"
+rand_core = "0.6"
+rand = "0.8"
+getrandom = "0.2"
+argon2 = "0.5"
+
+# --- serialization / utility ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1", features = ["alloc"] }
+hex = "0.4"
+thiserror = "1"
+anyhow = "1"
+
+# --- async / server / client ---
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["trace"] }
+redb = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- internal crates ---
+logos-identity = { path = "crates/logos-identity" }
+logos-ratchet = { path = "crates/logos-ratchet" }
+logos-pqxdh = { path = "crates/logos-pqxdh" }
+logos-sealed = { path = "crates/logos-sealed" }
+logos-proto = { path = "crates/logos-proto" }
+logos-client = { path = "crates/logos-client" }
+
+[profile.release]
+lto = true
