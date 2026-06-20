@@ -15,6 +15,7 @@ struct LogosApp: App {
                 }
             }
             .environmentObject(session)
+            .tint(LColor.gold)
         }
     }
 }

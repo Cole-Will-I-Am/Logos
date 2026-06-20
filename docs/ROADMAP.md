@@ -37,14 +37,18 @@ deployed relay must be reset together when it merges.
 
 Still open (NOT in PR #1), roughly by priority:
 
-1. **iOS UI / error surfacing** *(high)* — `ios/LogosApp/Sources/Session.swift`
-   appends the message bubble before `client.send` and only stores `lastError`
-   (rendered only in onboarding), so MITM/TOFU refusals and send failures show as
-   "delivered". Mark bubbles sent only after success; surface `lastError` in
-   Conversations/Chat; distinguish security refusals from network errors. Also:
-   create `Application Support` before first `create()/save()` (else first-run
-   ENOENT), and set `isExcludedFromBackup` + `FileProtection` on the store
-   (plaintext identity secret currently goes into device backups).
+1. **iOS UI / error surfacing** *(high)* — ✅ **mostly done** (see `docs/DESIGN.md`).
+   `Session` now tracks per-message `MessageStatus` and marks a bubble sent only
+   after `client.send` returns; send failures/refusals render honestly in the thread
+   (status row + tap-to-retry). MITM/TOFU refusals are surfaced via a **typed** error:
+   `logos-client::ClientError` is now an enum (`IdentityChanged`/`NotRegistered`/
+   `Network`/`Other`) mapped 1:1 onto the FFI `LogosError`, so the identity-changed
+   interstitial fires on a real key change (not a string heuristic). First-run
+   `Application Support` is created up front; the store is set `isExcludedFromBackup`
+   + `FileProtection(.completeUnlessOpen)`. **Residual:** `recv`/poll-loop errors
+   still only set `lastError` (rendered on onboarding) — a connectivity indicator on
+   the conversations list is a follow-up; and the FileProtection class is a tradeoff
+   for background polling (not at-rest store encryption — that's the Argon2id item).
 2. **Hybridize sealed sender (PQ metadata)** *(medium)* — the sealed-sender
    envelope uses classical X25519 to the recipient's static identity key, so
    sender-identity metadata is not post-quantum (harvest-now-decrypt-later),

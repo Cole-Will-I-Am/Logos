@@ -28,14 +28,44 @@ const KEM_PREKEY_COUNT: u32 = 10;
 /// Reserved id for the reusable last-resort ML-KEM prekey (one-time ids start at 1).
 const LAST_RESORT_KEM_ID: u32 = 0;
 
+/// Errors from the client engine. The variants the UI must treat differently are
+/// **typed** (not stringly): `IdentityChanged` drives the high-friction identity
+/// interstitial, `NotRegistered` an "unknown user" message, `Network` a retry. The
+/// FFI maps these 1:1 onto `LogosError` (see `logos-ffi`).
 #[derive(Debug, thiserror::Error)]
-#[error("logos-client: {0}")]
-pub struct ClientError(String);
+pub enum ClientError {
+    /// A TOFU-pinned contact's identity key changed — possible relay
+    /// key-substitution / impersonation (F-02/F-03). Surfaced distinctly so the UI
+    /// never shows it as a generic send failure.
+    #[error("identity for '{peer}' changed — refusing (possible impersonation/MITM)")]
+    IdentityChanged { peer: String },
+    /// The peer has no directory entry on this relay (not registered / typo).
+    #[error("'{peer}' isn't registered on this relay")]
+    NotRegistered { peer: String },
+    /// Transport-level failure reaching the relay. Retryable.
+    #[error("network error: {0}")]
+    Network(String),
+    /// Anything else (protocol, crypto, store, parse).
+    #[error("logos-client: {0}")]
+    Other(String),
+}
+
+impl ClientError {
+    fn other(s: impl Into<String>) -> Self {
+        ClientError::Other(s.into())
+    }
+}
 
 type Result<T> = std::result::Result<T, ClientError>;
 
+/// Wrap a non-network error (io / serde / crypto) as `Other`.
 fn err<E: std::fmt::Display>(e: E) -> ClientError {
-    ClientError(e.to_string())
+    ClientError::Other(e.to_string())
+}
+
+/// Wrap a relay transport error as `Network`.
+fn net(e: reqwest::Error) -> ClientError {
+    ClientError::Network(e.to_string())
 }
 
 fn now() -> u64 {
@@ -163,16 +193,16 @@ impl Client {
         http.post(format!("{server_url}/v1/register"))
             .json(&req)
             .send()
-            .map_err(err)?
+            .map_err(net)?
             .error_for_status()
-            .map_err(err)?;
+            .map_err(net)?;
 
         let server_vk: ServerKeyResponse = http
             .get(format!("{server_url}/v1/server-key"))
             .send()
-            .map_err(err)?
+            .map_err(net)?
             .json()
-            .map_err(err)?;
+            .map_err(net)?;
 
         let store = Store {
             username: username.to_string(),
@@ -210,7 +240,7 @@ impl Client {
         let bytes = std::fs::read(path.as_ref()).map_err(err)?;
         let store: Store = serde_json::from_slice(&bytes).map_err(err)?;
         if store.identity_secret.len() != 64 {
-            return Err(ClientError(format!(
+            return Err(ClientError::other(format!(
                 "corrupt store: identity_secret is {} bytes (expected 64)",
                 store.identity_secret.len()
             )));
@@ -275,11 +305,11 @@ impl Client {
             .post(format!("{}/v1/cert", self.server_url))
             .json(&req)
             .send()
-            .map_err(err)?
+            .map_err(net)?
             .error_for_status()
-            .map_err(err)?
+            .map_err(net)?
             .json()
-            .map_err(err)?;
+            .map_err(net)?;
         self.store.cert = Some(resp.certificate.clone());
         Ok(resp.certificate)
     }
@@ -288,15 +318,23 @@ impl Client {
         if self.store.sessions.contains_key(to) {
             return Ok(());
         }
-        let resp: DirectoryResponse = self
+        let http_resp = self
             .http
             .get(format!("{}/v1/directory/{to}", self.server_url))
             .send()
-            .map_err(err)?
-            .error_for_status()
-            .map_err(err)?
-            .json()
-            .map_err(err)?;
+            .map_err(net)?;
+        let http_resp = match http_resp.error_for_status() {
+            Ok(r) => r,
+            // 404 = the relay has no directory entry for this username — a normal
+            // "unknown user" (typo / not on Logos yet), not a transport failure.
+            Err(e) if e.status() == Some(reqwest::StatusCode::NOT_FOUND) => {
+                return Err(ClientError::NotRegistered {
+                    peer: to.to_string(),
+                });
+            }
+            Err(e) => return Err(net(e)),
+        };
+        let resp: DirectoryResponse = http_resp.json().map_err(net)?;
         let bundle = resp.bundle;
         // F-02/F-03: TOFU-pin the recipient identity from the directory; refuse if
         // it changed from a previously seen value (possible relay key-substitution).
@@ -333,7 +371,7 @@ impl Client {
             let initial = session
                 .pending_initial
                 .clone()
-                .ok_or_else(|| ClientError("missing initial".into()))?;
+                .ok_or_else(|| ClientError::other("missing initial"))?;
             OuterMessage::Prekey {
                 initial,
                 ratchet: ratchet_msg,
@@ -358,9 +396,9 @@ impl Client {
             .post(format!("{}/v1/mailbox/{id}", self.server_url))
             .json(&PostEnvelope { envelope })
             .send()
-            .map_err(err)?
+            .map_err(net)?
             .error_for_status()
-            .map_err(err)?;
+            .map_err(net)?;
         if is_initial {
             if let Some(s) = self.store.sessions.get_mut(to) {
                 s.sent_initial = true;
@@ -387,16 +425,16 @@ impl Client {
                 sig: fetch_sig,
             })
             .send()
-            .map_err(err)?
+            .map_err(net)?
             .error_for_status()
-            .map_err(err)?
+            .map_err(net)?
             .json()
-            .map_err(err)?;
+            .map_err(net)?;
 
         let server_vk = self
             .store
             .server_vk
-            .ok_or_else(|| ClientError("no server key".into()))?;
+            .ok_or_else(|| ClientError::other("no server key"))?;
         let dh_priv = self.identity_dh_priv();
         let mut out = Vec::new();
         let mut acked: Vec<u64> = Vec::new();
@@ -498,7 +536,7 @@ impl Client {
                     },
                     // No session yet: this may be a message reordered ahead of its
                     // establishing prekey message — keep it for a later attempt.
-                    None => Err(ClientError(format!("no session for {from}"))),
+                    None => Err(ClientError::other(format!("no session for {from}"))),
                 }
             }
         }
@@ -508,9 +546,9 @@ impl Client {
     /// refused (F-02/F-03). Real continuous verification needs key transparency.
     fn pin_identity(&mut self, username: &str, identity: &IdentityPublic) -> Result<()> {
         match self.store.contacts.get(username) {
-            Some(known) if known != identity => Err(ClientError(format!(
-                "identity for '{username}' changed — refusing (possible impersonation/MITM)"
-            ))),
+            Some(known) if known != identity => Err(ClientError::IdentityChanged {
+                peer: username.to_string(),
+            }),
             Some(_) => Ok(()),
             None => {
                 self.store.contacts.insert(username.to_string(), *identity);
@@ -530,13 +568,13 @@ impl Client {
         // handshake DH legs). Bind them, then TOFU-pin — so a malicious relay
         // can't forge a cert to impersonate or hijack a known contact's session.
         if cert.sender_identity != initial.initiator_identity {
-            return Err(ClientError(
-                "sender certificate identity does not match handshake identity".into(),
+            return Err(ClientError::other(
+                "sender certificate identity does not match handshake identity",
             ));
         }
         self.pin_identity(&cert.sender_username, &cert.sender_identity)?;
         if initial.signed_prekey_id != self.store.signed_prekey_id {
-            return Err(ClientError("unknown signed prekey id".into()));
+            return Err(ClientError::other("unknown signed prekey id"));
         }
         // Resolve the one-time prekeys the initiator selected, but do NOT consume
         // them yet — only after the whole handshake + first ratchet decrypt
@@ -549,7 +587,7 @@ impl Client {
                     .one_time
                     .iter()
                     .position(|o| o.id == otk_id)
-                    .ok_or_else(|| ClientError("unknown one-time prekey id".into()))?;
+                    .ok_or_else(|| ClientError::other("unknown one-time prekey id"))?;
                 Some((pos, self.store.one_time[pos].secret))
             }
             None => None,
@@ -565,7 +603,7 @@ impl Client {
                     .kem_one_time
                     .iter()
                     .position(|k| k.id == initial.kem_prekey_id)
-                    .ok_or_else(|| ClientError("unknown kem prekey id".into()))?,
+                    .ok_or_else(|| ClientError::other("unknown kem prekey id"))?,
             )
         };
         let kem_secret = match kem_one_time_pos {

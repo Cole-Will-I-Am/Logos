@@ -13,16 +13,35 @@ use logos_client::Client;
 
 uniffi::setup_scaffolding!();
 
-/// Errors surfaced across the FFI boundary (single-message, FFI-friendly).
+/// Errors surfaced across the FFI boundary. These are **typed** (not a single
+/// string) so the UI can react precisely: `IdentityChanged` must drive the
+/// high-friction identity interstitial, `NotRegistered` an "unknown user" message,
+/// `Network` a quiet retry. `Client` is the catch-all for everything else.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum LogosError {
+    /// A pinned contact's identity key changed — possible impersonation/MITM.
+    #[error("identity for '{peer}' changed — possible impersonation or MITM")]
+    IdentityChanged { peer: String },
+    /// The peer isn't registered on this relay (unknown username / typo).
+    #[error("'{peer}' isn't registered on this relay")]
+    NotRegistered { peer: String },
+    /// Transport-level failure reaching the relay. Retryable.
+    #[error("{msg}")]
+    Network { msg: String },
+    /// Anything else (protocol, crypto, store, parse).
     #[error("{msg}")]
     Client { msg: String },
 }
 
 impl From<logos_client::ClientError> for LogosError {
     fn from(e: logos_client::ClientError) -> Self {
-        LogosError::Client { msg: e.to_string() }
+        use logos_client::ClientError as C;
+        match e {
+            C::IdentityChanged { peer } => LogosError::IdentityChanged { peer },
+            C::NotRegistered { peer } => LogosError::NotRegistered { peer },
+            C::Network(msg) => LogosError::Network { msg },
+            C::Other(msg) => LogosError::Client { msg },
+        }
     }
 }
 
