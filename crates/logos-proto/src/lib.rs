@@ -130,11 +130,20 @@ pub fn ack_signed_bytes(identity: &IdentityPublic, ids: &[u64]) -> Vec<u8> {
     v
 }
 
-/// Opaque, stable per-recipient mailbox id derived from the recipient's identity
-/// DH key. (Phase 1 limitation: stable, not blinded/rotating — see PROTOCOL.md.)
-pub fn mailbox_id(recipient_identity_dh: &[u8; 32]) -> String {
+/// Opaque, stable per-recipient mailbox id derived from the recipient's **full
+/// identity** (`ed || dh`).
+///
+/// It must include the Ed25519 key, not just the X25519 DH key: `/v1/fetch` and
+/// `/v1/ack` prove control of the mailbox by verifying an Ed25519 signature over
+/// the requester's identity. If the mailbox were keyed by the DH key alone, an
+/// attacker could present `{ed: attacker_ed, dh: victim_dh}`, sign with their own
+/// Ed25519 key (signature valid), and the server would derive the *victim's*
+/// mailbox — letting anyone read/drain another user's mailbox. Binding the id to
+/// `ed` ties mailbox ownership to the key that actually authorizes reads.
+/// (Phase 1 limitation: stable, not blinded/rotating — see PROTOCOL.md.)
+pub fn mailbox_id(recipient: &IdentityPublic) -> String {
     let mut h = Sha256::new();
     h.update(b"logos-mailbox-v1");
-    h.update(recipient_identity_dh);
+    h.update(recipient.encode());
     hex::encode(h.finalize())
 }

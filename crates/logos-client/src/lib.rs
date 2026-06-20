@@ -45,6 +45,18 @@ fn now() -> u64 {
         .as_secs()
 }
 
+/// Blocking HTTP client with bounded connect/total timeouts so a slow or hung
+/// relay (an in-scope adversary) cannot wedge a call forever — important across
+/// the iOS FFI, where this runs under a `Mutex<Client>`. Falls back to the
+/// default client if the builder fails (it shouldn't).
+fn http_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new())
+}
+
 #[derive(Serialize, Deserialize)]
 struct OtkSecret {
     id: u32,
@@ -61,7 +73,10 @@ struct KemSecretRec {
 #[derive(Serialize, Deserialize)]
 struct Session {
     ratchet: RatchetState,
-    peer_identity_dh: [u8; 32],
+    /// Full peer identity (`ed` + `dh`). The `dh` half seals envelopes to the
+    /// peer; the full identity derives the peer's mailbox id (which must bind the
+    /// Ed25519 key — see `logos_proto::mailbox_id`).
+    peer_identity: IdentityPublic,
     sent_initial: bool,
     pending_initial: Option<InitialMessage>,
 }
@@ -144,7 +159,7 @@ impl Client {
             registration_sig: reg_sig.to_vec(),
         };
 
-        let http = reqwest::blocking::Client::new();
+        let http = http_client();
         http.post(format!("{server_url}/v1/register"))
             .json(&req)
             .send()
@@ -186,14 +201,25 @@ impl Client {
     }
 
     /// Load an existing client from `path`.
+    ///
+    /// Validates structural invariants the rest of the engine relies on (e.g. the
+    /// 64-byte identity secret) so a corrupt/tampered store surfaces a recoverable
+    /// error here rather than panicking on first use (which, across the iOS FFI
+    /// boundary, would crash the app).
     pub fn load(path: impl AsRef<Path>, server_url: &str) -> Result<Self> {
         let bytes = std::fs::read(path.as_ref()).map_err(err)?;
         let store: Store = serde_json::from_slice(&bytes).map_err(err)?;
+        if store.identity_secret.len() != 64 {
+            return Err(ClientError(format!(
+                "corrupt store: identity_secret is {} bytes (expected 64)",
+                store.identity_secret.len()
+            )));
+        }
         Ok(Self {
             store,
             path: path.as_ref().to_path_buf(),
             server_url: server_url.to_string(),
-            http: reqwest::blocking::Client::new(),
+            http: http_client(),
         })
     }
 
@@ -217,12 +243,18 @@ impl Client {
 
     /// Our mailbox id (where peers deliver to us).
     pub fn mailbox(&self) -> String {
-        mailbox_id(&self.identity().public().dh)
+        mailbox_id(&self.identity().public())
     }
 
+    /// Persist the store atomically: write to a temp file, then rename over the
+    /// target. `std::fs::write` truncates in place, so a crash mid-write would
+    /// corrupt the entire store (identity + sessions + prekeys); rename on the
+    /// same directory is atomic and leaves the old store intact on failure.
     fn save(&self) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(&self.store).map_err(err)?;
-        std::fs::write(&self.path, bytes).map_err(err)
+        let tmp = self.path.with_extension("tmp");
+        std::fs::write(&tmp, bytes).map_err(err)?;
+        std::fs::rename(&tmp, &self.path).map_err(err)
     }
 
     fn ensure_cert(&mut self) -> Result<SenderCertificate> {
@@ -275,7 +307,7 @@ impl Client {
             to.to_string(),
             Session {
                 ratchet,
-                peer_identity_dh: bundle.identity.dh,
+                peer_identity: bundle.identity,
                 sent_initial: false,
                 pending_initial: Some(init.initial_message),
             },
@@ -289,13 +321,19 @@ impl Client {
         let cert = self.ensure_cert()?;
 
         let session = self.store.sessions.get_mut(to).expect("session ensured");
+        // encrypt() advances the sending chain (consumes one message key, whose
+        // derived AEAD key+nonce are deterministic). That advance MUST be made
+        // durable BEFORE the ciphertext leaves the device: otherwise a crash
+        // between a successful POST and save() would roll the chain back, and the
+        // next send would reuse the same key+nonce on different plaintext — a
+        // catastrophic two-time-pad/forgery break of ChaCha20-Poly1305.
         let ratchet_msg = session.ratchet.encrypt(message.as_bytes(), b"");
-        let outer = if !session.sent_initial {
+        let is_initial = !session.sent_initial;
+        let outer = if is_initial {
             let initial = session
                 .pending_initial
                 .clone()
                 .ok_or_else(|| ClientError("missing initial".into()))?;
-            session.sent_initial = true;
             OuterMessage::Prekey {
                 initial,
                 ratchet: ratchet_msg,
@@ -305,11 +343,17 @@ impl Client {
                 ratchet: ratchet_msg,
             }
         };
-        let peer_dh = session.peer_identity_dh;
+        let peer_identity = session.peer_identity;
 
         let outer_bytes = serde_json::to_vec(&outer).map_err(err)?;
-        let envelope = seal(&peer_dh, &cert, &outer_bytes).map_err(err)?;
-        let id = mailbox_id(&peer_dh);
+        let envelope = seal(&peer_identity.dh, &cert, &outer_bytes).map_err(err)?;
+        let id = mailbox_id(&peer_identity);
+
+        // Persist the advanced ratchet before transmitting. `sent_initial` is left
+        // false until the POST succeeds, so if delivery fails the message is
+        // re-sent as a fresh prekey message (with the next, distinct key) rather
+        // than being lost or causing key reuse.
+        self.save()?;
         self.http
             .post(format!("{}/v1/mailbox/{id}", self.server_url))
             .json(&PostEnvelope { envelope })
@@ -317,7 +361,13 @@ impl Client {
             .map_err(err)?
             .error_for_status()
             .map_err(err)?;
-        self.save()
+        if is_initial {
+            if let Some(s) = self.store.sessions.get_mut(to) {
+                s.sent_initial = true;
+            }
+            self.save()?;
+        }
+        Ok(())
     }
 
     /// Fetch, decrypt, and return all pending messages.
@@ -352,18 +402,36 @@ impl Client {
         let mut acked: Vec<u64> = Vec::new();
 
         for stored in resp.envelopes {
-            // A malformed/undecryptable envelope is quarantined: left on the
-            // server (not ACKed) rather than failing the whole batch.
-            if let Ok(inc) = self.process_envelope(&stored.envelope, &server_vk, &dh_priv) {
-                out.push(inc);
-                acked.push(stored.id);
+            match self.process_envelope(&stored.envelope, &server_vk, &dh_priv) {
+                // A new message: deliver to the caller and ACK (delete) it.
+                Ok(Some(inc)) => {
+                    out.push(inc);
+                    acked.push(stored.id);
+                }
+                // A handled duplicate/replay (already-consumed message, or a prekey
+                // re-establishment for a session we already have): nothing to show,
+                // but ACK it so it cannot stick on the server forever and be
+                // re-fetched on every poll.
+                Ok(None) => acked.push(stored.id),
+                // Undecryptable for a recoverable reason (e.g. a Normal message that
+                // arrived ahead of its establishing prekey message): quarantine —
+                // leave it on the server (not ACKed) for a later attempt.
+                Err(_) => {}
             }
         }
+        // State (advanced ratchets, consumed prekeys) is durably persisted before
+        // we ACK — so a message is never deleted on the server before we can
+        // re-derive it.
         self.save()?;
 
+        // ACK is best-effort: the messages in `out` are already durably processed,
+        // so a failed ACK must NOT discard them (that would silently lose already-
+        // decrypted messages). Un-ACKed ids simply remain on the server and are
+        // re-fetched next time; already-consumed ones then ACK-drop harmlessly.
         if !acked.is_empty() {
             let ack_sig = identity.sign(&ack_signed_bytes(&id_pub, &acked)).to_vec();
-            self.http
+            let _ = self
+                .http
                 .post(format!("{}/v1/ack", self.server_url))
                 .json(&AckRequest {
                     identity: id_pub,
@@ -371,38 +439,67 @@ impl Client {
                     sig: ack_sig,
                 })
                 .send()
-                .map_err(err)?
-                .error_for_status()
-                .map_err(err)?;
+                .and_then(|r| r.error_for_status());
         }
         Ok(out)
     }
 
+    /// Process one inbound envelope.
+    ///
+    /// `Ok(Some)` is a new message to deliver (and ACK); `Ok(None)` is a handled
+    /// envelope to ACK (delete) but not deliver — a duplicate/replay, or garbage
+    /// we can never make progress on (failed unseal / unparseable inner payload),
+    /// which we drop so it cannot accumulate and be re-fetched on every poll;
+    /// `Err` means quarantine (leave on the server for a later attempt, e.g. a
+    /// Normal message that arrived ahead of its establishing prekey message).
     fn process_envelope(
         &mut self,
         env: &SealedEnvelope,
         server_vk: &[u8; 32],
         dh_priv: &[u8; 32],
-    ) -> Result<Incoming> {
-        let (cert, payload) = unseal(dh_priv, env, server_vk, now()).map_err(err)?;
+    ) -> Result<Option<Incoming>> {
+        // A forged/garbage/expired envelope (sealed sender is open to any poster)
+        // will never become decryptable — ACK-drop it rather than quarantine.
+        let (cert, payload) = match unseal(dh_priv, env, server_vk, now()) {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
         let from = cert.sender_username.clone();
-        let outer: OuterMessage = serde_json::from_slice(&payload).map_err(err)?;
+        let outer: OuterMessage = match serde_json::from_slice(&payload) {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
         match outer {
             OuterMessage::Prekey { initial, ratchet } => {
+                // Never let an inbound prekey (session-initiation) message reset an
+                // EXISTING session. Otherwise a replayed initial envelope — which
+                // re-derives the same root key whenever the handshake used the
+                // reusable last-resort KEM prekey / no one-time X25519 prekey —
+                // would clobber the live ratchet and break the conversation. A
+                // genuine re-key requires an explicit, out-of-band session reset.
+                if self.store.sessions.contains_key(&from) {
+                    return Ok(None);
+                }
                 let text = self.establish_and_decrypt(&cert, initial, ratchet)?;
-                Ok(Incoming { from, text })
+                Ok(Some(Incoming { from, text }))
             }
             OuterMessage::Normal { ratchet } => {
-                let session = self
-                    .store
-                    .sessions
-                    .get_mut(&from)
-                    .ok_or_else(|| ClientError(format!("no session for {from}")))?;
-                let pt = session.ratchet.decrypt(&ratchet, b"").map_err(err)?;
-                Ok(Incoming {
-                    from,
-                    text: String::from_utf8_lossy(&pt).into_owned(),
-                })
+                match self.store.sessions.get_mut(&from) {
+                    Some(session) => match session.ratchet.decrypt(&ratchet, b"") {
+                        Ok(pt) => Ok(Some(Incoming {
+                            from,
+                            text: String::from_utf8_lossy(&pt).into_owned(),
+                        })),
+                        // The transactional ratchet left state untouched. A Normal
+                        // message that no longer decrypts on a live session is a
+                        // replay/corrupt duplicate (the real one was already
+                        // consumed) — ACK-and-drop so it can't stick forever.
+                        Err(_) => Ok(None),
+                    },
+                    // No session yet: this may be a message reordered ahead of its
+                    // establishing prekey message — keep it for a later attempt.
+                    None => Err(ClientError(format!("no session for {from}"))),
+                }
             }
         }
     }
@@ -441,7 +538,11 @@ impl Client {
         if initial.signed_prekey_id != self.store.signed_prekey_id {
             return Err(ClientError("unknown signed prekey id".into()));
         }
-        let one_time_priv = match initial.one_time_prekey_id {
+        // Resolve the one-time prekeys the initiator selected, but do NOT consume
+        // them yet — only after the whole handshake + first ratchet decrypt
+        // succeeds. Consuming up front let a malformed/forged prekey message
+        // permanently burn a victim's one-time prekeys (F-05 transactional fix).
+        let otk = match initial.one_time_prekey_id {
             Some(otk_id) => {
                 let pos = self
                     .store
@@ -449,22 +550,29 @@ impl Client {
                     .iter()
                     .position(|o| o.id == otk_id)
                     .ok_or_else(|| ClientError("unknown one-time prekey id".into()))?;
-                Some(self.store.one_time.remove(pos).secret)
+                Some((pos, self.store.one_time[pos].secret))
             }
             None => None,
         };
-        // Resolve the ML-KEM prekey the initiator chose: the reusable last-resort
-        // (kept), or a one-time prekey (consumed after use) (F-05).
-        let kem_secret = if initial.kem_prekey_id == self.store.kem_last_resort.id {
-            KemSecret::from_bytes(&self.store.kem_last_resort.secret).map_err(err)?
+        let one_time_priv = otk.as_ref().map(|(_, s)| *s);
+        // The reusable last-resort KEM prekey is kept; a one-time KEM prekey is
+        // consumed only on success (tracked by index here).
+        let kem_one_time_pos = if initial.kem_prekey_id == self.store.kem_last_resort.id {
+            None
         } else {
-            let pos = self
-                .store
-                .kem_one_time
-                .iter()
-                .position(|k| k.id == initial.kem_prekey_id)
-                .ok_or_else(|| ClientError("unknown kem prekey id".into()))?;
-            KemSecret::from_bytes(&self.store.kem_one_time.remove(pos).secret).map_err(err)?
+            Some(
+                self.store
+                    .kem_one_time
+                    .iter()
+                    .position(|k| k.id == initial.kem_prekey_id)
+                    .ok_or_else(|| ClientError("unknown kem prekey id".into()))?,
+            )
+        };
+        let kem_secret = match kem_one_time_pos {
+            None => KemSecret::from_bytes(&self.store.kem_last_resort.secret).map_err(err)?,
+            Some(pos) => {
+                KemSecret::from_bytes(&self.store.kem_one_time[pos].secret).map_err(err)?
+            }
         };
         let resp = respond(
             &self.identity(),
@@ -476,11 +584,19 @@ impl Client {
         .map_err(err)?;
         let mut ratchet = RatchetState::init_responder(resp.root_key, resp.signed_prekey_priv);
         let pt = ratchet.decrypt(&ratchet_msg, b"").map_err(err)?;
+
+        // Success: now commit the one-time prekey consumption and the new session.
+        if let Some((pos, _)) = otk {
+            self.store.one_time.remove(pos);
+        }
+        if let Some(pos) = kem_one_time_pos {
+            self.store.kem_one_time.remove(pos);
+        }
         self.store.sessions.insert(
             cert.sender_username.clone(),
             Session {
                 ratchet,
-                peer_identity_dh: cert.sender_identity.dh,
+                peer_identity: cert.sender_identity,
                 sent_initial: true,
                 pending_initial: None,
             },

@@ -11,7 +11,6 @@ x25519-dalek.workspace = true
 ml-kem.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
-subtle.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 serde.workspace = true

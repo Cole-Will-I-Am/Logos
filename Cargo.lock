@@ -1164,7 +1164,6 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "sha2",
- "subtle",
  "thiserror 1.0.69",
  "x25519-dalek",
  "zeroize",

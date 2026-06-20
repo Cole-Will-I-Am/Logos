@@ -11,6 +11,13 @@ on:
       - "Cargo.*"
       - ".github/workflows/ios.yml"
 
+# Least privilege: CI only needs to read the repo. cargo build/test executes
+# untrusted build.rs + proc-macros from the whole dependency tree, so the
+# GITHUB_TOKEN must not carry write scope. (Pin every `uses:` to a full commit
+# SHA as a follow-up — `@stable`/`@v4` are mutable refs.)
+permissions:
+  contents: read
+
 jobs:
   # Fast Linux job: the whole Rust workspace (incl. the FFI crate + smoke test).
   rust:
@@ -56,4 +63,6 @@ jobs:
         with:
           name: LogosKit-xcframework
           path: ios/LogosKit/LogosFFI.xcframework
-          if-no-files-found: warn
+          # Fail (not just warn) if the xcframework is missing, so a broken build
+          # can't pass green having produced no artifact.
+          if-no-files-found: error

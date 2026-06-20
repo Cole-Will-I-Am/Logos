@@ -275,7 +275,8 @@ pub fn new_kem_prekey(id: u32, identity: &IdentityKeyPair) -> (KemPreKeyPublic, 
 }
 
 /// A human-comparable safety number derived from both identities (Signal-style):
-/// SHA-256 over the sorted identity encodings, rendered as 12 groups of 5 digits.
+/// SHA-256 over the sorted identity encodings, rendered as 6 groups of 5 digits.
+/// (6 groups ≈ 99 bits compared; a full Signal-style 60-digit number is future work.)
 pub fn safety_number(a: &IdentityPublic, b: &IdentityPublic) -> String {
     let (first, second) = {
         let (ea, eb) = (a.encode(), b.encode());

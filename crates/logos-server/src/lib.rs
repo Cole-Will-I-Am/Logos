@@ -29,6 +29,12 @@ use logos_sealed::issue_certificate;
 
 const CERT_TTL_SECS: u64 = 24 * 60 * 60;
 
+/// Bound per-mailbox queue length so an unauthenticated poster cannot grow the
+/// store without limit (`/v1/mailbox/{id}` is intentionally open so any sender
+/// can deliver). This caps disk/memory blast radius to one mailbox; real abuse
+/// resistance (auth, rate limits, TTL sweep) is tracked separately.
+const MAX_MAILBOX_MESSAGES: usize = 4096;
+
 struct DirEntry {
     identity: IdentityPublic,
     signed_prekey: SignedPreKeyPublic,
@@ -67,16 +73,54 @@ pub fn new_state() -> AppState {
 
 /// Persist the sealed-sender signing key at `path` so a relay restart keeps the
 /// same `server_vk` that clients have pinned (F-13).
-pub fn new_state_at(path: &str) -> AppState {
+///
+/// A key is generated and written **only** when the file is genuinely absent. A
+/// present-but-invalid file (wrong length, unreadable) is a fatal startup error
+/// rather than being silently overwritten — silently rotating the signing key
+/// would invalidate every sender certificate clients have pinned and destroy the
+/// (possibly recoverable) original key. Generated keys are written `0600`.
+pub fn new_state_at(path: &str) -> std::io::Result<AppState> {
     let seed: [u8; 32] = match std::fs::read(path) {
         Ok(b) if b.len() == 32 => b.try_into().unwrap(),
-        _ => {
+        Ok(b) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "server key file {path} is present but {} bytes (expected 32) — refusing to \
+                     overwrite and rotate the signing key; move it aside to rotate intentionally",
+                    b.len()
+                ),
+            ));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let s = SigningKey::generate(&mut rand::rngs::OsRng).to_bytes();
-            let _ = std::fs::write(path, s);
+            write_key_file(path, &s)?;
             s
         }
+        Err(e) => return Err(e),
     };
-    state_from_seed(seed)
+    Ok(state_from_seed(seed))
+}
+
+/// Write a freshly generated signing key, restricting it to owner-only (`0600`)
+/// on Unix. The seed can mint sender certificates, so it must not be world-readable.
+fn write_key_file(path: &str, seed: &[u8; 32]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(seed)?;
+        f.flush()
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, seed)
+    }
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -196,11 +240,17 @@ async fn post_mailbox(
 ) -> StatusCode {
     let mut inner = state.0.lock().unwrap();
     let msg_id = inner.next_id;
-    inner.next_id += 1;
-    inner.mailboxes.entry(id).or_default().push(StoredEnvelope {
+    let queue = inner.mailboxes.entry(id).or_default();
+    if queue.len() >= MAX_MAILBOX_MESSAGES {
+        // Mailbox full: refuse rather than grow without bound. The owner drains
+        // it via fetch + ACK.
+        return StatusCode::INSUFFICIENT_STORAGE;
+    }
+    queue.push(StoredEnvelope {
         id: msg_id,
         envelope: req.envelope,
     });
+    inner.next_id += 1;
     StatusCode::OK
 }
 
@@ -213,7 +263,7 @@ async fn fetch(
 ) -> Result<Json<FetchResponse>, ApiError> {
     verify(&req.identity, &fetch_signed_bytes(&req.identity), &req.sig)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "bad fetch signature".into()))?;
-    let mb = mailbox_id(&req.identity.dh);
+    let mb = mailbox_id(&req.identity);
     let inner = state.0.lock().unwrap();
     let envelopes = inner.mailboxes.get(&mb).cloned().unwrap_or_default();
     Ok(Json(FetchResponse { envelopes }))
@@ -231,7 +281,7 @@ async fn ack(
         &req.sig,
     )
     .map_err(|_| (StatusCode::UNAUTHORIZED, "bad ack signature".into()))?;
-    let mb = mailbox_id(&req.identity.dh);
+    let mb = mailbox_id(&req.identity);
     let mut inner = state.0.lock().unwrap();
     if let Some(q) = inner.mailboxes.get_mut(&mb) {
         q.retain(|e| !req.ids.contains(&e.id));
@@ -242,6 +292,7 @@ async fn ack(
 /// Run the relay on `addr` until the process exits, persisting the signing key
 /// at `key_path` so restarts keep the same `server_vk`.
 pub async fn run(addr: std::net::SocketAddr, key_path: &str) -> std::io::Result<()> {
+    let state = new_state_at(key_path)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, build_router(new_state_at(key_path))).await
+    axum::serve(listener, build_router(state)).await
 }

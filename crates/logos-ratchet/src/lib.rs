@@ -278,7 +278,9 @@ impl RatchetState {
 
     fn skip_message_keys(&mut self, until: u32) -> Result<(), RatchetError> {
         if let Some(ck) = self.ckr {
-            if self.nr + MAX_SKIP < until {
+            // `until` (header.n / header.pn) is attacker-controlled; use a
+            // saturating add so an extreme value can't integer-overflow here.
+            if self.nr.saturating_add(MAX_SKIP) < until {
                 return Err(RatchetError::TooManySkipped);
             }
             let dhr = self.dhr.expect("dhr set when ckr set");

@@ -40,7 +40,11 @@ Scoped to the Phase-1 crypto core. The full program's threat model follows the
 - **No key transparency yet** → a malicious directory could substitute a
   contact's identity key at first contact undetected unless users compare safety
   numbers out of band.
-- **No relay implemented yet** → recipient/timing metadata protections are design,
-  not code, at this phase.
+- **Relay is implemented** (`logos-server`): the mailbox queue and sealed sender
+  are code, so content- and sender-hiding hold against it today. But the relay
+  still sees **recipient mailbox + timing**, mailbox ids are **stable** (not
+  blinded/rotating), and mailbox posting is open (any sender can deliver, bounded
+  only by a per-mailbox cap). Mixnet/onion transport and blinded mailbox ids
+  remain design, not code.
 - **Unaudited composition** → forward secrecy / PCS / hybrid guarantees hold only
   if the assembled protocol is correct; this requires an external audit.

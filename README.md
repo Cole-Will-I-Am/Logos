@@ -21,8 +21,9 @@ audited *primitives*; we do not invent cryptography.
 
 ## Status: working 1:1 E2EE walking skeleton ✅
 
-`cargo test --workspace` → **22 passing**, including an end-to-end integration
-test where two clients exchange encrypted messages through a live relay.
+`cargo test --workspace` → **33 passing**, including an end-to-end integration
+test where two clients exchange encrypted messages through a live relay, plus
+security regression tests (replay/redelivery, corrupt-store, key-persistence).
 
 | Crate | Responsibility |
 |-------|----------------|
@@ -31,14 +32,20 @@ test where two clients exchange encrypted messages through a live relay.
 | `logos-pqxdh` | **PQXDH** hybrid handshake (X25519 X3DH legs + ML-KEM-1024) → ratchet root key, transcript-bound |
 | `logos-sealed` | **Sealed sender** — server-signed certs + ephemeral-X25519 envelope; hides the sender from the relay |
 | `logos-proto` | Shared wire types + endpoint contract |
-| `logos-server` | Minimal-trust relay (axum): public-key directory, opaque mailbox queue, **delete-on-deliver**, sealed-sender cert issuance |
+| `logos-server` | Minimal-trust relay (axum): public-key directory, opaque mailbox queue, **authenticated fetch + ACK-based deletion**, sealed-sender cert issuance |
 | `logos-client` | Sync, FFI-friendly client engine: register / send / recv; file-backed session store |
 | `logos-cli` | `logos` dev binary: `register` / `send` / `recv` / `whoami` |
 
 The relay never sees message plaintext, and sealed sender keeps it from learning
-who sent a delivered message. Honest caveats (tracked, not yet closed): it still
-sees recipient mailbox + timing; mailbox fetch is not yet authenticated/ACK-based
-(a known address could be drained — fix in progress); and it currently issues the
+who sent a delivered message. Mailbox **fetch is authenticated** (the caller
+proves control of the identity key and the server derives the mailbox from it, so
+only the owner can read) and deletion is **ACK-based** (envelopes are removed only
+after the client durably processes and ACKs them). Honest caveats (tracked, not
+yet closed): the relay still sees recipient mailbox + timing; mailbox ids are
+stable (not blinded/rotating); `/v1/mailbox/{id}` posting is open by design (any
+sender can deliver), bounded only by a per-mailbox cap (rate limiting / TTL is
+future work); one-time prekeys can be drained by unauthenticated directory fetches
+(replenishment + rate limits are future work); and the relay currently issues the
 sealed-sender certificates, so under a fully malicious operator that authority
 should move to key transparency / a separate issuer (sender identity is already
 TOFU-pinned client-side as a first defense).
@@ -77,7 +84,7 @@ See [`ios/README.md`](ios/README.md). Status is tracked in
 ## Build & test
 
 ```sh
-cargo test --workspace        # 22 tests
+cargo test --workspace        # 33 tests
 cargo clippy --workspace --all-targets
 cargo fmt --check
 ```

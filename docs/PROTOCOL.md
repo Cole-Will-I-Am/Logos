@@ -110,6 +110,17 @@ the known server key and checks expiry before trusting the sender identity.
   mismatch — blocking a malicious relay from forging a certificate to impersonate
   or to reset/hijack a known contact's session. Continuous detection still needs a
   key-transparency log (future work).
+- **No prekey-replay session reset:** an inbound prekey (session-initiation)
+  message for a contact that **already has a session** is ACK-dropped, never used
+  to re-establish. Otherwise replaying the captured initial envelope — which
+  re-derives the same root key whenever the handshake fell back to the reusable
+  last-resort KEM prekey / used no one-time X25519 prekey — would clobber the live
+  ratchet and break the conversation. A genuine re-key therefore requires an
+  explicit, out-of-band session reset (future UI work).
+- **Idempotent receive:** the client only ACKs (deletes) an envelope after it is
+  durably processed; a replayed/duplicate message that no longer decrypts on a
+  live session, and unsealable/garbage envelopes, are ACK-dropped so they cannot
+  accumulate and be re-fetched on every poll.
 
 ## Known limitations / open items
 
@@ -128,6 +139,14 @@ the known server key and checks expiry before trusting the sender identity.
   ML-KEM" property holds with PQ forward secrecy for one-time-prekey sessions;
   only sessions that fell back to the last-resort key share its longer-lived
   secret (until it is rotated).
+- **Mailbox posting is open by design** (any sender can deliver a sealed
+  envelope), bounded only by a per-mailbox length cap on the relay. Rate limiting
+  and TTL sweeping are future work.
+- **One-time prekeys can be drained by unauthenticated directory fetches** (each
+  fetch consumes one X25519 + one ML-KEM one-time prekey); there is no
+  replenishment path yet, so a drained user falls back to the reusable last-resort
+  KEM prekey + no one-time X25519 prekey for new sessions. Rate limiting +
+  replenishment are future work.
 - Single device per identity; no multi-device fan-out.
 - Client store is plaintext JSON (Argon2id encryption-at-rest planned).
 - The composed protocol is **unaudited**.
