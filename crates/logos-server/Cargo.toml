@@ -1,0 +1,25 @@
+[package]
+name = "logos-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "logos_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "logos-server"
+path = "src/main.rs"
+
+[dependencies]
+logos-proto.workspace = true
+logos-identity.workspace = true
+logos-sealed.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

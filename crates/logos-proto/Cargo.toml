@@ -1,0 +1,15 @@
+[package]
+name = "logos-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+logos-identity.workspace = true
+logos-pqxdh.workspace = true
+logos-ratchet.workspace = true
+logos-sealed.workspace = true
+serde.workspace = true
+sha2.workspace = true
+hex.workspace = true

@@ -299,7 +299,7 @@ mod tests {
 
     fn pair(root: [u8; 32]) -> (RatchetState, RatchetState) {
         // Bob's initial ratchet keypair == his signed prekey.
-        let bob_priv = X25519Secret::random_from_rng(&mut rand::rngs::OsRng);
+        let bob_priv = X25519Secret::random_from_rng(rand::rngs::OsRng);
         let bob_pub = X25519Public::from(&bob_priv).to_bytes();
         let alice = RatchetState::init_initiator(root, bob_pub);
         let bob = RatchetState::init_responder(root, bob_priv.to_bytes());

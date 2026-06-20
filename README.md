@@ -6,63 +6,82 @@
 > itself been audited**. Security claims must follow an external audit, never
 > precede it. Treat this as a learning/reference build only.
 
-Logos is the first phase of an ultra-secure messenger that treats its own server
-as hostile: no server-readable content, sender identity hidden from the relay,
-and **post-quantum-hybrid** key agreement by default. Identity is username-first
-— **no phone numbers, ever**.
+Logos is an end-to-end-encrypted messenger that treats its own server as hostile:
+no server-readable content, sender identity hidden from the relay, and
+**post-quantum-hybrid** key agreement by default. Identity is username-first —
+**no phone numbers, ever**. The target client is an **iOS app** (see below); the
+core is Rust so it can be shared across platforms via a Swift FFI binding.
 
-This phase implements the **cryptographic core** of a 1:1 messenger as a Rust
-workspace, built on audited primitive crates (`*-dalek`, RustCrypto `ml-kem`,
+Built on audited primitive crates (`*-dalek`, RustCrypto `ml-kem`,
 `chacha20poly1305`, `hkdf`, `hmac`) and implemented strictly against the
 published Signal **Double Ratchet** and **PQXDH** specifications. We reuse
 audited *primitives*; we do not invent cryptography.
 
-## What's implemented (Phase 1 — crypto core) ✅
+## Status: working 1:1 E2EE walking skeleton ✅
 
-| Crate | Responsibility | Tests |
-|-------|----------------|:----:|
-| `logos-identity` | Ed25519 identity + X25519 DH keys, prekey bundles, **ML-KEM-1024** prekeys, safety numbers | 8 |
-| `logos-ratchet` | **Double Ratchet** (X25519 + HKDF-SHA256 + ChaCha20-Poly1305): forward secrecy + post-compromise security, skipped/out-of-order keys | 5 |
-| `logos-pqxdh` | **PQXDH** hybrid handshake (X25519 X3DH legs + ML-KEM-1024) → ratchet root key; transcript-bound | 4 |
-| `logos-sealed` | **Sealed sender**: server-signed sender certificates + ephemeral-X25519 envelope; hides the sender from the relay | 4 |
+`cargo test --workspace` → **22 passing**, including an end-to-end integration
+test where two clients exchange encrypted messages through a live relay.
 
-`cargo test --workspace` → **21 passing**, including an end-to-end test that runs
-a full PQXDH handshake and then exchanges Double-Ratchet messages.
+| Crate | Responsibility |
+|-------|----------------|
+| `logos-identity` | Ed25519 + X25519 identity, signed/one-time prekeys, **ML-KEM-1024** prekeys, prekey-bundle verification, safety numbers |
+| `logos-ratchet` | **Double Ratchet** (FS + post-compromise security, out-of-order handling) |
+| `logos-pqxdh` | **PQXDH** hybrid handshake (X25519 X3DH legs + ML-KEM-1024) → ratchet root key, transcript-bound |
+| `logos-sealed` | **Sealed sender** — server-signed certs + ephemeral-X25519 envelope; hides the sender from the relay |
+| `logos-proto` | Shared wire types + endpoint contract |
+| `logos-server` | Minimal-trust relay (axum): public-key directory, opaque mailbox queue, **delete-on-deliver**, sealed-sender cert issuance |
+| `logos-client` | Sync, FFI-friendly client engine: register / send / recv; file-backed session store |
+| `logos-cli` | `logos` dev binary: `register` / `send` / `recv` / `whoami` |
 
-## Security properties (of the crypto core)
+The relay only ever sees public keys, opaque sealed envelopes addressed to a
+mailbox id, and cert requests — never plaintext, and never who sent a message.
 
-- **Post-quantum hybrid:** an attacker must break **both** X25519 **and**
-  ML-KEM-1024 to recover a session key (harvest-now-decrypt-later resistance).
-- **Forward secrecy + post-compromise security:** via the Double Ratchet.
-- **Sender anonymity vs. the relay:** sealed sender means a server-side observer
-  sees only an opaque blob addressed to a mailbox, never who sent it.
-- **Authentication:** prekey bundles and sender certificates are signature-bound;
-  safety numbers allow out-of-band verification.
+## Quickstart
 
-## Roadmap (not yet built — Phase 2+)
+```sh
+cargo run -p logos-server &                                   # relay on 127.0.0.1:8787
+S=http://127.0.0.1:8787
+cargo run -p logos-cli -- --store alice.json register alice
+cargo run -p logos-cli -- --store bob.json   register bob
+cargo run -p logos-cli -- --store alice.json send bob "hello bob"
+cargo run -p logos-cli -- --store bob.json   recv             # -> alice: hello bob
+```
 
-The networked transport and apps are the next increment:
+## iOS app (the target client)
 
-- `logos-proto` / `logos-server` (axum + redb): minimal-trust relay — encrypted
-  mailbox, store-and-forward, delete-on-deliver, TTL; key directory; sender-cert issuance.
-- `logos-client` / `logos-cli`: `register` / `send` / `recv` / `verify` over the relay.
-- Later (per the design blueprint): MLS groups, key-transparency log + auditing,
-  mixnet/onion transport, multi-device, backups/recovery, abuse defenses,
-  reproducible-build CI, mobile clients.
+The `logos-client` engine is deliberately **synchronous with plain types**
+(strings/bytes), so it can be wrapped for Swift with **UniFFI** and shipped as an
+**xcframework** the iOS app links against — no async crossing the FFI boundary.
+The relay stays server-side Rust. Building the UniFFI binding + a SwiftUI app is
+the next milestone (`logos-ffi` crate → `LogosKit.xcframework`).
+
+> Note on reproducible builds: per the design blueprint, App Store binaries can't
+> be bit-for-bit reproduced (Apple re-signs/encrypts), so iOS will lean on the
+> open Rust core + binary-transparency rather than reproducible IPAs.
 
 ## Build & test
 
 ```sh
-# Rust stable (see rust-toolchain.toml)
-cargo test --workspace      # 21 tests
-cargo clippy --workspace
+cargo test --workspace        # 22 tests
+cargo clippy --workspace --all-targets
 cargo fmt --check
 ```
+
+## Roadmap
+
+Done: crypto core (identity / PQXDH / ratchet / sealed) · relay + client + CLI ·
+end-to-end test.
+
+Next: `logos-ffi` (UniFFI) + iOS SwiftUI app · persistent relay store (redb) +
+TTL sweep · encryption-at-rest for the client store (Argon2id) · **key
+transparency** log + auditing · MLS groups · mixnet/onion transport ·
+multi-device · backups/recovery · abuse defenses · **external security audit**
+(gating any real use).
 
 ## Design docs
 
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — the exact handshake / ratchet /
-  sealed-sender construction (written to be auditable).
+  sealed-sender / relay construction (written to be auditable).
 - [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) — assets, adversaries, and
   what is explicitly out of scope.
 
