@@ -16,12 +16,12 @@ struct OnboardingView: View {
             VStack(spacing: Space.lg) {
                 Spacer(minLength: Space.xl)
 
-                // Mark + wordmark (the serif signature)
+                // Brand wordmark (real lockup: emblem + "Logos")
                 VStack(spacing: Space.sm) {
-                    Image(systemName: "building.columns.fill")
-                        .font(.system(size: 44, weight: .regular))
-                        .foregroundStyle(LColor.gold)
-                    Text("Logos").font(LFont.display).foregroundStyle(LColor.ink)
+                    Image("Wordmark")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 220)
                     Text("End-to-end encrypted messages.\nNo phone number, no email.")
                         .font(LFont.callout).foregroundStyle(LColor.inkSecondary)
                         .multilineTextAlignment(.center)

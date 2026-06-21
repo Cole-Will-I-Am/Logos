@@ -33,13 +33,12 @@ struct SettingsView: View {
     }
 
     private var brandHeader: some View {
-        VStack(spacing: Space.xs) {
-            Image(systemName: "building.columns.fill")
-                .font(.system(size: 32)).foregroundStyle(LColor.gold)
-            Text("Logos").font(LFont.title).foregroundStyle(LColor.ink)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.bottom, Space.xs)
+        Image("Wordmark")
+            .resizable()
+            .scaledToFit()
+            .frame(width: 176)
+            .frame(maxWidth: .infinity)
+            .padding(.bottom, Space.xs)
     }
 
     private var networkSection: some View {
@@ -161,8 +160,8 @@ struct SettingsView: View {
     private var myQRSheet: some View {
         NavigationStack {
             VStack(spacing: Space.md) {
-                Image(systemName: "building.columns.fill")
-                    .font(.system(size: 22)).foregroundStyle(LColor.gold)
+                Image("Emblem")
+                    .resizable().scaledToFit().frame(height: 30)
                 LAvatar(name: session.username ?? "?", size: 64)
                 Text(session.username.map { "@\($0)" } ?? "")
                     .font(LFont.title3).foregroundStyle(LColor.ink)

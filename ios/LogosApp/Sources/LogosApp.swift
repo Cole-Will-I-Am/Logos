@@ -40,13 +40,11 @@ struct SplashView: View {
     var body: some View {
         ZStack {
             LColor.canvas.ignoresSafeArea()
-            VStack(spacing: Space.md) {
-                Image(systemName: "building.columns.fill")
-                    .font(.system(size: 60, weight: .regular))
-                    .foregroundStyle(LColor.gold)
-                Text("Logos").font(LFont.display).foregroundStyle(LColor.ink)
-            }
-            .scaleEffect(appear ? 1 : 0.94)
+            Image("Wordmark")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 248)
+                .scaleEffect(appear ? 1 : 0.94)
             .opacity(appear ? 1 : 0)
         }
         .onAppear { withAnimation(.easeOut(duration: 0.5)) { appear = true } }
