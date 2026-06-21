@@ -36,6 +36,10 @@ final class Session: ObservableObject {
     @Published var username: String?
     @Published var mailboxId: String = ""
     @Published var conversations: [String] = []
+    /// Saved, local, manually-managed address book (usernames on the active relay).
+    /// Persists independently of conversations: deleting a chat keeps the contact;
+    /// `removeContact` forgets them entirely. Never synced/uploaded.
+    @Published var contacts: [String] = []
     @Published var messages: [String: [ChatMessage]] = [:]
     @Published var security: [String: SessionSecurity] = [:]
     // Inbox state (persisted with history).
@@ -108,7 +112,7 @@ final class Session: ObservableObject {
         pollTask?.cancel(); await pollTask?.value; pollTask = nil
         client = nil
         username = nil; mailboxId = ""
-        conversations = []; messages = [:]; security = [:]; lastError = nil
+        conversations = []; contacts = []; messages = [:]; security = [:]; lastError = nil
         online = true; lastSynced = nil; syncing = false
         pinned = []; archived = []; unread = [:]; nicknames = [:]; avatars = [:]
         relayURL = trimmed
@@ -132,7 +136,7 @@ final class Session: ObservableObject {
         try? FileManager.default.removeItem(at: avatarDir)
         StoreKey.rotate() // re-mint the device key so any resurrected ciphertext is undecryptable
         username = nil; mailboxId = ""
-        conversations = []; messages = [:]; security = [:]; lastError = nil
+        conversations = []; contacts = []; messages = [:]; security = [:]; lastError = nil
         online = true; lastSynced = nil; syncing = false
         pinned = []; archived = []; unread = [:]; nicknames = [:]; avatars = [:]
         activePeer = nil
@@ -210,6 +214,31 @@ final class Session: ObservableObject {
     func startConversation(with peer: String) {
         if !conversations.contains(peer) { conversations.append(peer) }
         if messages[peer] == nil { messages[peer] = [] }
+        if !contacts.contains(peer) { contacts.append(peer); contacts.sort() }
+        persist()
+    }
+
+    // MARK: - Contacts (local address book)
+
+    /// Save a person as a contact without (yet) starting a chat. Local-only; manual.
+    func addContact(_ username: String) {
+        let u = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !u.isEmpty, !contacts.contains(u) else { return }
+        contacts.append(u)
+        contacts.sort()
+        persist()
+    }
+
+    func isContact(_ peer: String) -> Bool { contacts.contains(peer) }
+
+    /// Forget a person entirely on this device: their chat, history, nickname, photo,
+    /// and the saved contact. (Deleting a *chat* keeps the contact; this removes it.)
+    func removeContact(_ peer: String) {
+        deleteConversation(peer)
+        contacts.removeAll { $0 == peer }
+        nicknames[peer] = nil
+        avatars[peer] = nil
+        try? FileManager.default.removeItem(at: avatarURL(peer))
         persist()
     }
 
@@ -242,9 +271,8 @@ final class Session: ObservableObject {
         unread[peer] = nil
         pinned.remove(peer)
         archived.remove(peer)
-        nicknames[peer] = nil
-        avatars[peer] = nil
-        try? FileManager.default.removeItem(at: avatarURL(peer))
+        // Keep the saved contact + its nickname/photo so the person can be re-messaged;
+        // `removeContact(_:)` forgets them entirely.
         persist()
     }
     /// Most recent activity, for sorting the inbox.
@@ -391,6 +419,7 @@ final class Session: ObservableObject {
         var archived: [String]?
         var unread: [String: Int]?
         var nicknames: [String: String]?
+        var contacts: [String]?
     }
 
     private func loadHistory() {
@@ -410,6 +439,8 @@ final class Session: ObservableObject {
         }
         guard let snap = try? JSONDecoder().decode(HistorySnapshot.self, from: data) else { return }
         conversations = snap.conversations
+        // Migration: pre-contacts stores seed the address book from past chat partners.
+        contacts = (snap.contacts ?? conversations).sorted()
         security = snap.security
         pinned = Set(snap.pinned ?? [])
         archived = Set(snap.archived ?? [])
@@ -435,7 +466,7 @@ final class Session: ObservableObject {
     private func persist() {
         let snap = HistorySnapshot(conversations: conversations, messages: messages, security: security,
                                    pinned: Array(pinned), archived: Array(archived), unread: unread,
-                                   nicknames: nicknames)
+                                   nicknames: nicknames, contacts: contacts)
         do {
             let data = try JSONEncoder().encode(snap)
             // Seal at rest with the device Keychain key (defence in depth alongside

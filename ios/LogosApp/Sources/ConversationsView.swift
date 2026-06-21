@@ -3,6 +3,7 @@ import SwiftUI
 struct ConversationsView: View {
     @EnvironmentObject var session: Session
     @State private var showCompose = false
+    @State private var showContacts = false
     @State private var showExperimental = true
     @State private var showArchived = false
     @State private var query = ""
@@ -31,6 +32,12 @@ struct ConversationsView: View {
                     .accessibilityLabel("Settings")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button { Haptic.tap(); showContacts = true } label: {
+                        Image(systemName: "person.2").foregroundStyle(LColor.ink)
+                    }
+                    .accessibilityLabel("Contacts")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button { Haptic.tap(); showCompose = true } label: {
                         Image(systemName: "square.and.pencil").foregroundStyle(LColor.goldText)
                     }
@@ -38,6 +45,7 @@ struct ConversationsView: View {
                 }
             }
             .sheet(isPresented: $showCompose) { ComposeSheet() }
+            .sheet(isPresented: $showContacts) { ContactsView() }
         }
     }
 
