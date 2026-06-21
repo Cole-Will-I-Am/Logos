@@ -31,6 +31,21 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     /// Local-only (the wire carries the attribution in the message text); optional so
     /// existing persisted history decodes with `nil`.
     var aiAuthor: String? = nil
+    /// Set when this bubble carries a photo/file. The bytes live on disk in
+    /// `logos-attachments/<id>`; only this small descriptor is persisted. Optional so
+    /// existing persisted history decodes with `nil`.
+    var attachment: Attachment? = nil
+}
+
+/// A photo or file attached to a message. Bytes are stored on disk (keyed by `id`),
+/// never inline in the history snapshot. Sent E2EE over the normal message path,
+/// base64-chunked under the relay's 1 MiB body cap.
+struct Attachment: Codable, Equatable {
+    let id: String       // local file id (== reassembly id on the wire)
+    let name: String     // original filename, e.g. "Photo.jpg"
+    let mime: String
+    let size: Int        // bytes
+    let isImage: Bool
 }
 
 /// Owns the Rust `LogosClient` and drives the UI. `LogosClient` calls are blocking
@@ -323,8 +338,15 @@ final class Session: ObservableObject {
 
     /// Retry a previously failed/blocked message in place (keeps order; no duplicate bubble).
     func retry(_ id: UUID, in peer: String) {
-        guard let text = messages[peer]?.first(where: { $0.id == id })?.text else { return }
-        deliver(id, to: peer, text: text)
+        guard let m = messages[peer]?.first(where: { $0.id == id }) else { return }
+        if let att = m.attachment {
+            guard let data = readAttachment(att.id) else {
+                setStatus(id, in: peer, .failed("Attachment is no longer available.")); return
+            }
+            deliverAttachment(id, to: peer, data: data, att: att)
+        } else {
+            deliver(id, to: peer, text: m.text)
+        }
     }
 
     /// Single source of truth for an outbound attempt. The bubble is only marked
@@ -457,6 +479,122 @@ final class Session: ObservableObject {
         let msg = ChatMessage(text: answer, mine: true, status: .sending, at: Date(), aiAuthor: name)
         messages[peer, default: []].append(msg)
         deliver(msg.id, to: peer, text: wire)
+    }
+
+    // MARK: - Attachments (photos / files; E2EE over the normal message path, no relay/FFI change)
+
+    /// SOH-delimited marker (a control char the user can't type) → no collision with real text.
+    private static let attMarker = "\u{01}LATT1\u{01}"
+    /// Raw bytes per chunk. The wire cost ≈ base64 (×1.33) then serde_json byte-array (×~3.5),
+    /// so ~160 KiB raw stays well under the relay's 1 MiB request-body cap.
+    static let attChunkRaw = 160 * 1024
+    static let attMaxBytes = 15 * 1024 * 1024
+
+    private struct AttHeader: Codable {
+        let id: String; let name: String; let mime: String; let size: Int
+        let isImage: Bool; let idx: Int; let total: Int
+    }
+    private struct RxAtt { let header: AttHeader; var parts: [Int: Data] }
+    private var rxAssembly: [String: RxAtt] = [:]
+
+    var attachmentsDir: URL { dir.appendingPathComponent("logos-attachments", isDirectory: true) }
+    func attachmentURL(_ id: String) -> URL { attachmentsDir.appendingPathComponent(id) }
+    private func readAttachment(_ id: String) -> Data? { try? Data(contentsOf: attachmentURL(id)) }
+    private func writeAttachment(id: String, data: Data) {
+        try? FileManager.default.createDirectory(at: attachmentsDir, withIntermediateDirectories: true)
+        var url = attachmentURL(id)
+        try? data.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
+        var rv = URLResourceValues(); rv.isExcludedFromBackup = true
+        try? url.setResourceValues(rv)
+    }
+
+    /// Send a photo/file. Writes a local copy for instant display, then base64-chunks the
+    /// bytes and sends each chunk as a normal E2EE message (the relay only ever sees
+    /// ciphertext). The bubble flips to `.sent` once every chunk is delivered.
+    func sendAttachment(to peer: String, data: Data, name: String, mime: String, isImage: Bool) {
+        guard client != nil else { lastError = "No identity loaded."; return }
+        guard data.count <= Self.attMaxBytes else {
+            lastError = "That file is too large to send (max \(Self.attMaxBytes / (1024 * 1024)) MB)."
+            Haptic.warn(); return
+        }
+        startConversation(with: peer)
+        let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        writeAttachment(id: id, data: data)
+        let att = Attachment(id: id, name: name, mime: mime, size: data.count, isImage: isImage)
+        let msg = ChatMessage(text: "", mine: true, status: .sending, at: Date(), attachment: att)
+        messages[peer, default: []].append(msg)
+        persist()
+        deliverAttachment(msg.id, to: peer, data: data, att: att)
+    }
+
+    /// Single source of truth for an attachment send attempt (used by send + retry).
+    private func deliverAttachment(_ msgId: UUID, to peer: String, data: Data, att: Attachment) {
+        guard let client else { return }
+        setStatus(msgId, in: peer, .sending)
+        let chunks: [Data] = stride(from: 0, to: max(data.count, 1), by: Self.attChunkRaw).map { off in
+            data.subdata(in: off ..< min(off + Self.attChunkRaw, data.count))
+        }
+        let total = max(chunks.count, 1)
+        Task {
+            do {
+                for (idx, chunk) in chunks.enumerated() {
+                    let header = AttHeader(id: att.id, name: att.name, mime: att.mime,
+                                           size: att.size, isImage: att.isImage, idx: idx, total: total)
+                    let headerB64 = try JSONEncoder().encode(header).base64EncodedString()
+                    let wire = Self.attMarker + headerB64 + "\u{01}" + chunk.base64EncodedString()
+                    try await runBlocking { try client.send(to: peer, message: wire) }
+                }
+                setStatus(msgId, in: peer, .sent)
+                if security[peer] == nil { security[peer] = .encrypted }
+            } catch {
+                switch classify(error) {
+                case .identityChanged:
+                    setStatus(msgId, in: peer, .blocked(
+                        "We couldn’t confirm \(peer)’s identity. Don’t send anything sensitive until you verify them."))
+                    security[peer] = .identityChanged; Haptic.warn()
+                case .network(let message):
+                    setStatus(msgId, in: peer, .failed(message))
+                }
+                lastError = friendly(error)
+            }
+        }
+    }
+
+    /// Decode an inbound message as an attachment chunk, or nil if it's ordinary text.
+    private static func decodeChunk(_ text: String) -> (header: AttHeader, data: Data)? {
+        guard text.hasPrefix(attMarker) else { return nil }
+        let rest = text.dropFirst(attMarker.count)
+        guard let sep = rest.firstIndex(of: "\u{01}") else { return nil }
+        let headerB64 = String(rest[..<sep])
+        let chunkB64 = String(rest[rest.index(after: sep)...])
+        guard let hData = Data(base64Encoded: headerB64),
+              let header = try? JSONDecoder().decode(AttHeader.self, from: hData),
+              let data = Data(base64Encoded: chunkB64) else { return nil }
+        return (header, data)
+    }
+
+    /// Buffer an inbound chunk; return a finished message once all chunks have arrived.
+    private func ingestChunk(_ header: AttHeader, _ data: Data) -> ChatMessage? {
+        guard header.total > 0, header.size <= Self.attMaxBytes else { return nil }
+        var rx = rxAssembly[header.id] ?? RxAtt(header: header, parts: [:])
+        rx.parts[header.idx] = data
+        rxAssembly[header.id] = rx
+        // Bound memory if a sender wedges incomplete assemblies.
+        if rxAssembly.count > 8, let stale = rxAssembly.keys.first(where: { $0 != header.id }) {
+            rxAssembly[stale] = nil
+        }
+        guard rx.parts.count >= header.total else { return nil }
+        var full = Data()
+        for i in 0 ..< header.total {
+            guard let p = rx.parts[i] else { return nil }   // gap — wait for it
+            full.append(p)
+        }
+        rxAssembly[header.id] = nil
+        guard full.count <= Self.attMaxBytes else { return nil }
+        writeAttachment(id: header.id, data: full)
+        let att = Attachment(id: header.id, name: header.name, mime: header.mime,
+                             size: full.count, isImage: header.isImage)
+        return ChatMessage(text: "", mine: false, status: .sent, at: Date(), attachment: att)
     }
 
     // MARK: - Contact verification
@@ -663,10 +801,23 @@ final class Session: ObservableObject {
             guard gen == identityGeneration, self.client != nil else { return }
             for m in incoming {
                 startConversation(with: m.from)
-                messages[m.from, default: []].append(
-                    ChatMessage(text: m.text, mine: false, status: .sent, at: Date()))
-                if m.from != activePeer { unread[m.from, default: 0] += 1 }
-                if security[m.from] == nil { security[m.from] = .encrypted }
+                let appended: Bool
+                if let chunk = Self.decodeChunk(m.text) {
+                    // Attachment chunk: buffer it; only surface a bubble once it's whole.
+                    if let done = ingestChunk(chunk.header, chunk.data) {
+                        messages[m.from, default: []].append(done); appended = true
+                    } else {
+                        appended = false
+                    }
+                } else {
+                    messages[m.from, default: []].append(
+                        ChatMessage(text: m.text, mine: false, status: .sent, at: Date()))
+                    appended = true
+                }
+                if appended {
+                    if m.from != activePeer { unread[m.from, default: 0] += 1 }
+                    if security[m.from] == nil { security[m.from] = .encrypted }
+                }
             }
             if !incoming.isEmpty { persist() }
             online = true
@@ -690,6 +841,18 @@ func runBlocking<T>(_ work: @escaping () throws -> T) async throws -> T {
 }
 
 extension UIImage {
+    /// Downscale so the longest side is at most `maxDimension` (keeps aspect ratio).
+    /// Used to keep sent photos a sane size for the chunked wire.
+    func resizedForSending(maxDimension: CGFloat) -> UIImage {
+        let longest = max(size.width, size.height)
+        guard longest > maxDimension, longest > 0 else { return self }
+        let scale = maxDimension / longest
+        let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+        return UIGraphicsImageRenderer(size: newSize).image { _ in
+            draw(in: CGRect(origin: .zero, size: newSize))
+        }
+    }
+
     /// Aspect-fill crop to a square of `side` points (for a compact avatar thumbnail).
     func squareThumbnail(_ side: CGFloat) -> UIImage {
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side))

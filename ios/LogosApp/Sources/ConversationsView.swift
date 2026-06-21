@@ -227,7 +227,12 @@ private struct ConversationRow: View {
         switch last.status {
         case .blocked: return "⚠︎ Identity could not be verified"
         case .failed:  return "Not delivered"
-        default:       return (last.mine ? "You: " : "") + last.text
+        default:
+            let prefix = last.mine ? "You: " : ""
+            if let att = last.attachment {
+                return prefix + (att.isImage ? "📷 Photo" : "📎 " + att.name)
+            }
+            return prefix + last.text
         }
     }
 }

@@ -1,4 +1,6 @@
 import SwiftUI
+import PhotosUI
+import UniformTypeIdentifiers
 
 struct ChatView: View {
     @EnvironmentObject var session: Session
@@ -9,6 +11,10 @@ struct ChatView: View {
     @AppStorage("ai.assistantName") private var assistantName = AIConfig.defaultAssistantName
     @State private var showCloudConsent = false
     @State private var pendingQuestion = ""
+    @State private var showAttachMenu = false
+    @State private var showPhotoPicker = false
+    @State private var photoItem: PhotosPickerItem?
+    @State private var showFileImporter = false
     @FocusState private var composerFocused: Bool
 
     private var msgs: [ChatMessage] { session.messages[peer] ?? [] }
@@ -67,6 +73,39 @@ struct ChatView: View {
         } message: {
             Text("Your recent messages in this chat will be sent to \(provider.label) to answer, leaving end-to-end encryption (the Logos relay still never sees them). On-device AI keeps everything private.")
         }
+        .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: .images)
+        .onChange(of: photoItem) { item in
+            guard let item else { return }
+            Task {
+                let data = try? await item.loadTransferable(type: Data.self)
+                if let data { sendImage(data) }
+                photoItem = nil
+            }
+        }
+        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
+            if case .success(let urls) = result, let url = urls.first { sendFile(url) }
+        }
+    }
+
+    // MARK: - Attachments
+
+    @MainActor private func sendImage(_ data: Data) {
+        guard let img = UIImage(data: data) else { session.lastError = "Couldn’t read that image."; return }
+        let resized = img.resizedForSending(maxDimension: 2048)
+        guard let jpeg = resized.jpegData(compressionQuality: 0.7) else { return }
+        Haptic.send()
+        session.sendAttachment(to: peer, data: jpeg, name: "Photo.jpg", mime: "image/jpeg", isImage: true)
+    }
+
+    @MainActor private func sendFile(_ url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url) else { session.lastError = "Couldn’t read that file."; return }
+        let type = UTType(filenameExtension: url.pathExtension)
+        let isImage = type?.conforms(to: .image) ?? false
+        let mime = type?.preferredMIMEType ?? "application/octet-stream"
+        Haptic.send()
+        session.sendAttachment(to: peer, data: data, name: url.lastPathComponent, mime: mime, isImage: isImage)
     }
 
     // Tiny, quiet status under the title. Loud only when something is wrong.
@@ -168,13 +207,18 @@ struct ChatView: View {
             mentionSuggestion
             Divider().background(LColor.hairline)
             HStack(alignment: .bottom, spacing: Space.xs) {
-                Button { Haptic.tap() } label: {
+                Button { Haptic.tap(); showAttachMenu = true } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(LColor.inkSecondary)
                         .frame(width: 36, height: 36)
                 }
                 .accessibilityLabel("Add attachment")
+                .confirmationDialog("Attach", isPresented: $showAttachMenu, titleVisibility: .hidden) {
+                    Button("Photo Library") { showPhotoPicker = true }
+                    Button("File") { showFileImporter = true }
+                    Button("Cancel", role: .cancel) {}
+                }
 
                 TextField("Message", text: $draft, axis: .vertical)
                     .focused($composerFocused)
@@ -321,13 +365,17 @@ struct MessageBubble: View {
                         .foregroundStyle(LColor.goldText)
                         .padding(.horizontal, 4)
                 }
-                Text(message.text)
-                    .font(LFont.body)
-                    .foregroundStyle(isAI ? LColor.ink : (message.mine ? LColor.bubbleMineText : LColor.ink))
-                    .padding(.horizontal, 13).padding(.vertical, 9)
-                    .background(isAI ? LColor.goldWash : (message.mine ? LColor.bubbleMine : LColor.surfaceAlt))
-                    .clipShape(RoundedRectangle(cornerRadius: Radius.bubble, style: .continuous))
-                    .textSelection(.enabled)
+                if let att = message.attachment {
+                    AttachmentBubble(attachment: att, mine: message.mine)
+                } else {
+                    Text(message.text)
+                        .font(LFont.body)
+                        .foregroundStyle(isAI ? LColor.ink : (message.mine ? LColor.bubbleMineText : LColor.ink))
+                        .padding(.horizontal, 13).padding(.vertical, 9)
+                        .background(isAI ? LColor.goldWash : (message.mine ? LColor.bubbleMine : LColor.surfaceAlt))
+                        .clipShape(RoundedRectangle(cornerRadius: Radius.bubble, style: .continuous))
+                        .textSelection(.enabled)
+                }
                 if message.mine && showStatus { statusRow }
             }
             if !message.mine { Spacer(minLength: 48) }
@@ -370,6 +418,86 @@ struct MessageBubble: View {
             Text(text)
         }
         .font(.system(size: 10, weight: .medium)).foregroundStyle(tint)
+    }
+}
+
+// MARK: - Attachment bubble
+
+/// Renders a photo (tappable → full screen) or a file chip (name + size + share) for a
+/// message that carries an `Attachment`. Bytes are read from the on-disk store.
+private struct AttachmentBubble: View {
+    @EnvironmentObject var session: Session
+    let attachment: Attachment
+    let mine: Bool
+    @State private var showImage = false
+
+    private var url: URL { session.attachmentURL(attachment.id) }
+    private var exists: Bool { FileManager.default.fileExists(atPath: url.path) }
+
+    var body: some View {
+        if attachment.isImage, exists, let ui = UIImage(contentsOfFile: url.path) {
+            Image(uiImage: ui)
+                .resizable().scaledToFill()
+                .frame(maxWidth: 230, maxHeight: 300)
+                .clipShape(RoundedRectangle(cornerRadius: Radius.bubble, style: .continuous))
+                .contentShape(Rectangle())
+                .onTapGesture { showImage = true }
+                .fullScreenCover(isPresented: $showImage) { ImageViewer(url: url) }
+                .accessibilityLabel("Photo")
+        } else {
+            HStack(spacing: Space.sm) {
+                Image(systemName: "doc.fill")
+                    .font(.system(size: 18, weight: .medium)).foregroundStyle(LColor.goldText)
+                    .frame(width: 36, height: 36)
+                    .background(LColor.goldWash, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(attachment.name)
+                        .font(LFont.subhead.weight(.medium))
+                        .foregroundStyle(mine ? LColor.bubbleMineText : LColor.ink).lineLimit(1)
+                    Text(ByteCountFormatter.string(fromByteCount: Int64(attachment.size), countStyle: .file))
+                        .font(LFont.caption).foregroundStyle(LColor.inkTertiary)
+                }
+                if exists {
+                    ShareLink(item: url) {
+                        Image(systemName: "square.and.arrow.up").font(.system(size: 15)).foregroundStyle(LColor.goldText)
+                    }
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .frame(maxWidth: 260)
+            .background(mine ? LColor.bubbleMine : LColor.surfaceAlt)
+            .clipShape(RoundedRectangle(cornerRadius: Radius.bubble, style: .continuous))
+            .accessibilityLabel("File, \(attachment.name)")
+        }
+    }
+}
+
+/// Full-screen photo viewer with close + share.
+private struct ImageViewer: View {
+    @Environment(\.dismiss) private var dismiss
+    let url: URL
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if let ui = UIImage(contentsOfFile: url.path) {
+                Image(uiImage: ui).resizable().scaledToFit().ignoresSafeArea()
+            }
+            VStack {
+                HStack {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark.circle.fill").font(.system(size: 28))
+                            .foregroundStyle(.white.opacity(0.9)).padding()
+                    }
+                    Spacer()
+                    ShareLink(item: url) {
+                        Image(systemName: "square.and.arrow.up").font(.system(size: 22))
+                            .foregroundStyle(.white.opacity(0.9)).padding()
+                    }
+                }
+                Spacer()
+            }
+        }
     }
 }
 
