@@ -12,6 +12,7 @@ struct AISettingsView: View {
     @State private var testing = false
     @State private var testResult: String?
     @State private var testOK = false
+    @State private var assistantName = AIConfig.assistantName
 
     var body: some View {
         NavigationStack {
@@ -20,6 +21,14 @@ struct AISettingsView: View {
                     LBanner(tone: .neutral, icon: "lock.shield",
                             title: "Your keys, your data",
                             message: "Keys are stored only on this device and are never sent to the Logos relay — calls go straight from your phone to the provider. Cloud providers (Anthropic, OpenAI) can read what you send them. Ollama on your own server (or on-device) keeps it private.")
+
+                    field(label: "ASSISTANT NAME") {
+                        TextField(AIConfig.defaultAssistantName, text: $assistantName)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Shown in your chat list and at the top of the AI chat. Local to this device.")
+                            .font(LFont.caption).foregroundStyle(LColor.inkTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
                     field(label: "PROVIDER") {
                         Picker("Provider", selection: $provider) {
@@ -109,15 +118,15 @@ struct AISettingsView: View {
     private var ollamaFields: some View {
         VStack(alignment: .leading, spacing: Space.md) {
             field(label: "ENDPOINT") {
-                TextField("https://your-ollama.ts.net", text: $ollamaEndpoint)
+                TextField("Leave blank for Ollama Cloud", text: $ollamaEndpoint)
                     .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                     .textFieldStyle(.roundedBorder)
-                Text("Your own Ollama server (e.g. a Mac or VPS). Content stays between your phone and your server.")
+                Text("For your own Ollama server (a Mac or VPS) — content stays between your phone and your server. Leave blank to use Ollama Cloud (ollama.com) with just the key below.")
                     .font(LFont.caption).foregroundStyle(LColor.inkTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            field(label: "API KEY (optional, for Ollama Cloud)") {
-                SecureField(ModelKeys.hasKey(.ollama) ? "Key saved — enter to replace" : "leave blank for local", text: $ollamaKey)
+            field(label: "API KEY (required for Ollama Cloud, optional for your server)") {
+                SecureField(ModelKeys.hasKey(.ollama) ? "Key saved — enter to replace" : "Ollama Cloud key, or blank for a local server", text: $ollamaKey)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .textFieldStyle(.roundedBorder)
             }
@@ -126,6 +135,7 @@ struct AISettingsView: View {
 
     private func save() {
         Haptic.tap()
+        AIConfig.assistantName = assistantName
         AIConfig.provider = provider
         AIConfig.setModel(model, for: provider)
         if provider.isCloud, !newKey.trimmingCharacters(in: .whitespaces).isEmpty {

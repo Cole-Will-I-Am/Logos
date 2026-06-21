@@ -356,6 +356,55 @@ final class Session: ObservableObject {
 
     func clearError() { lastError = nil }
 
+    // MARK: - AI assistant (local; on-device by default, never via the relay)
+
+    /// Reserved local thread id for the user's private AI assistant. Contains a colon,
+    /// so it can never collide with a real relay username/mailbox. Kept OUT of
+    /// `conversations` and `contacts` so none of the people-facing logic ever touches
+    /// it — the inbox surfaces it through a dedicated pinned row instead.
+    static let aiPeer = "ai:assistant"
+
+    /// True while a reply is in flight (drives the typing indicator).
+    @Published var aiPending = false
+    /// Last AI failure, surfaced inline in the AI chat. Cleared on the next send.
+    @Published var aiError: String?
+
+    var aiMessages: [ChatMessage] { messages[Self.aiPeer] ?? [] }
+
+    /// Send a message to the on-device / BYOK assistant. Unlike `send(to:)`, this never
+    /// touches the Rust client or the relay — it calls the chosen provider directly
+    /// (see `AIClient`) and appends the reply locally. The whole thread is the context.
+    func sendToAI(_ text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !aiPending else { return }
+        aiError = nil
+        messages[Self.aiPeer, default: []].append(
+            ChatMessage(text: t, mine: true, status: .sent, at: Date()))
+        persist()
+        aiPending = true
+        let history = messages[Self.aiPeer] ?? []
+        let name = AIConfig.assistantName
+        Task {
+            do {
+                let reply = try await AIClient.reply(assistantName: name, history: history)
+                messages[Self.aiPeer, default: []].append(
+                    ChatMessage(text: reply, mine: false, status: .sent, at: Date()))
+            } catch {
+                aiError = (error as? AIError)?.errorDescription ?? error.localizedDescription
+                Haptic.warn()
+            }
+            aiPending = false
+            persist()
+        }
+    }
+
+    /// Wipe the local AI conversation (this device only).
+    func clearAIConversation() {
+        messages[Self.aiPeer] = nil
+        aiError = nil
+        persist()
+    }
+
     // MARK: - Contact verification
 
     /// Verification state for `peer` from the Rust core (safety number, verified,

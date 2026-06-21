@@ -109,7 +109,7 @@ enum AIClient {
     }
 
     private static func ollama(system: String, user: String) async throws -> String {
-        let base = AIConfig.ollamaEndpoint.trimmingCharacters(in: .whitespaces)
+        let base = AIConfig.ollamaBase.trimmingCharacters(in: .whitespaces)
         guard !base.isEmpty, let url = URL(string: base.hasSuffix("/") ? "\(base)api/chat" : "\(base)/api/chat")
         else { throw AIError.notConfigured }
         var headers: [String: String] = [:]
@@ -124,6 +124,111 @@ enum AIClient {
         ]
         let data = try await post(url, headers: headers, body: body)
         // { "message": { "content": "..." } }
+        let o = try json(data)
+        guard let message = o["message"] as? [String: Any],
+              let text = message["content"] as? String
+        else { throw AIError.badResponse }
+        return text
+    }
+
+    // MARK: - Assistant chat (multi-turn — powers the dedicated AI chat)
+
+    /// A multi-turn reply for the AI chat thread. Unlike `complete` (one-shot), this
+    /// feeds the running conversation back to the provider so the assistant keeps
+    /// context. Same privacy posture: straight from the device to the chosen provider,
+    /// never via the Logos relay.
+    static func reply(assistantName: String, history: [ChatMessage]) async throws -> String {
+        let system = """
+        You are \(assistantName), a private AI assistant inside the Logos end-to-end-encrypted \
+        messenger. You are chatting directly with the user — this is not a summary of someone \
+        else's conversation. Be helpful, concise, and conversational, and say so plainly when \
+        you don't know something.
+        """
+        let turns = collapse(history.map { (role: $0.mine ? "user" : "assistant", content: $0.text) })
+        switch AIConfig.effectiveProvider {
+        case .none: throw AIError.notConfigured
+        case .onDevice:
+            // The on-device wrapper is single-prompt, so flatten the thread into a transcript.
+            let convo = history.map { ($0.mine ? "User" : assistantName) + ": " + $0.text }
+                .joined(separator: "\n")
+            return try await AppleOnDevice.complete(system: system, user: convo.isEmpty ? "Hello" : convo)
+        case .anthropic: return try await anthropicChat(system: system, turns: turns)
+        case .openai:    return try await openaiChat(system: system, turns: turns)
+        case .ollama:    return try await ollamaChat(system: system, turns: turns)
+        }
+    }
+
+    /// Merge adjacent same-role turns. A failed assistant reply leaves the user's next
+    /// message as a second user turn in a row, which strict providers (Anthropic)
+    /// reject — coalesce so the messages array always alternates cleanly.
+    private static func collapse(_ turns: [(role: String, content: String)]) -> [(role: String, content: String)] {
+        var out: [(role: String, content: String)] = []
+        for t in turns {
+            if !out.isEmpty, out[out.count - 1].role == t.role {
+                out[out.count - 1].content += "\n\n" + t.content
+            } else {
+                out.append(t)
+            }
+        }
+        return out
+    }
+
+    private static func payload(_ turns: [(role: String, content: String)]) -> [[String: Any]] {
+        turns.map { ["role": $0.role, "content": $0.content] }
+    }
+
+    private static func anthropicChat(system: String, turns: [(role: String, content: String)]) async throws -> String {
+        guard let key = ModelKeys.key(.anthropic) else { throw AIError.notConfigured }
+        let url = URL(string: "https://api.anthropic.com/v1/messages")!
+        let body: [String: Any] = [
+            "model": AIConfig.model(for: .anthropic),
+            "max_tokens": 1024,
+            "system": system,
+            "messages": payload(turns),
+        ]
+        let data = try await post(url, headers: [
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+        ], body: body)
+        let o = try json(data)
+        guard let content = o["content"] as? [[String: Any]],
+              let text = content.first(where: { ($0["type"] as? String) == "text" })?["text"] as? String
+        else { throw AIError.badResponse }
+        return text
+    }
+
+    private static func openaiChat(system: String, turns: [(role: String, content: String)]) async throws -> String {
+        guard let key = ModelKeys.key(.openai) else { throw AIError.notConfigured }
+        let url = URL(string: "https://api.openai.com/v1/chat/completions")!
+        var messages: [[String: Any]] = [["role": "system", "content": system]]
+        messages += payload(turns)
+        let body: [String: Any] = [
+            "model": AIConfig.model(for: .openai),
+            "messages": messages,
+        ]
+        let data = try await post(url, headers: ["Authorization": "Bearer \(key)"], body: body)
+        let o = try json(data)
+        guard let choices = o["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let text = message["content"] as? String
+        else { throw AIError.badResponse }
+        return text
+    }
+
+    private static func ollamaChat(system: String, turns: [(role: String, content: String)]) async throws -> String {
+        let base = AIConfig.ollamaBase.trimmingCharacters(in: .whitespaces)
+        guard !base.isEmpty, let url = URL(string: base.hasSuffix("/") ? "\(base)api/chat" : "\(base)/api/chat")
+        else { throw AIError.notConfigured }
+        var headers: [String: String] = [:]
+        if let key = ModelKeys.key(.ollama) { headers["Authorization"] = "Bearer \(key)" }
+        var messages: [[String: Any]] = [["role": "system", "content": system]]
+        messages += payload(turns)
+        let body: [String: Any] = [
+            "model": AIConfig.model(for: .ollama),
+            "stream": false,
+            "messages": messages,
+        ]
+        let data = try await post(url, headers: headers, body: body)
         let o = try json(data)
         guard let message = o["message"] as? [String: Any],
               let text = message["content"] as? String

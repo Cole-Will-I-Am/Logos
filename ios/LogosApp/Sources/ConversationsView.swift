@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ConversationsView: View {
     @EnvironmentObject var session: Session
+    @AppStorage("ai.assistantName") private var assistantName = AIConfig.defaultAssistantName
     @State private var showCompose = false
     @State private var showContacts = false
     @State private var showExperimental = true
@@ -63,6 +64,17 @@ struct ConversationsView: View {
         if let t = session.messages[peer]?.last?.text, t.localizedCaseInsensitiveContains(query) { return true }
         return false
     }
+    private var aiName: String {
+        let t = assistantName.trimmingCharacters(in: .whitespaces)
+        return t.isEmpty ? AIConfig.defaultAssistantName : t
+    }
+    private var matchesAIRow: Bool {
+        guard !query.isEmpty else { return true }
+        if aiName.localizedCaseInsensitiveContains(query) { return true }
+        if "ai".localizedCaseInsensitiveContains(query) || "assistant".localizedCaseInsensitiveContains(query) { return true }
+        if let t = session.aiMessages.last?.text, t.localizedCaseInsensitiveContains(query) { return true }
+        return false
+    }
     private var visible: [String] {
         ordered(session.conversations.filter { !session.archived.contains($0) && matches($0) })
     }
@@ -71,26 +83,37 @@ struct ConversationsView: View {
     }
 
     @ViewBuilder private var content: some View {
-        if session.conversations.isEmpty {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                if showExperimental && query.isEmpty { experimentalBanner }
+                if matchesAIRow { aiRow }
+                ForEach(visible, id: \.self) { row($0) }
+                emptyOrNoMatches
+                if !archivedList.isEmpty { archivedSection }
+            }
+            .padding(.vertical, Space.xs)
+        }
+    }
+
+    // The AI row is always available, so the centered empty state is replaced by a
+    // lighter hint that sits below it.
+    @ViewBuilder private var emptyOrNoMatches: some View {
+        if session.conversations.isEmpty && query.isEmpty {
             LEmptyState(
                 title: "No conversations yet",
-                message: "Start one with a username — your messages are end-to-end encrypted from the very first hello."
-            )
-        } else {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    if showExperimental && query.isEmpty { experimentalBanner }
-                    ForEach(visible, id: \.self) { row($0) }
-                    if visible.isEmpty {
-                        Text(query.isEmpty ? "No active conversations" : "No matches")
-                            .font(LFont.subhead).foregroundStyle(LColor.inkTertiary)
-                            .frame(maxWidth: .infinity).padding(Space.xl)
-                    }
-                    if !archivedList.isEmpty { archivedSection }
-                }
-                .padding(.vertical, Space.xs)
-            }
+                message: "Start one with a username — your messages are end-to-end encrypted from the very first hello.")
+                .padding(.top, Space.md)
+        } else if visible.isEmpty && !matchesAIRow {
+            Text(query.isEmpty ? "No active conversations" : "No matches")
+                .font(LFont.subhead).foregroundStyle(LColor.inkTertiary)
+                .frame(maxWidth: .infinity).padding(Space.xl)
         }
+    }
+
+    @ViewBuilder private var aiRow: some View {
+        NavigationLink { AIChatView() } label: { AIInboxRow() }
+            .buttonStyle(.plain)
+        Divider().background(LColor.hairline).padding(.leading, 78)
     }
 
     private var experimentalBanner: some View {
@@ -206,5 +229,58 @@ private struct ConversationRow: View {
         case .failed:  return "Not delivered"
         default:       return (last.mine ? "You: " : "") + last.text
         }
+    }
+}
+
+/// The pinned "AI assistant" entry at the top of the inbox. Distinct from a person
+/// (gold sparkle avatar, "AI" chip, user-chosen name); opens `AIChatView`.
+private struct AIInboxRow: View {
+    @EnvironmentObject var session: Session
+    @AppStorage("ai.assistantName") private var assistantName = AIConfig.defaultAssistantName
+
+    private var name: String {
+        let t = assistantName.trimmingCharacters(in: .whitespaces)
+        return t.isEmpty ? AIConfig.defaultAssistantName : t
+    }
+    private var last: ChatMessage? { session.aiMessages.last }
+    private var preview: String {
+        if session.aiPending { return "Thinking…" }
+        guard let last else { return "Ask me anything — private by default" }
+        return (last.mine ? "You: " : "") + last.text
+    }
+
+    var body: some View {
+        HStack(spacing: Space.sm) {
+            ZStack {
+                Circle().fill(LColor.gold)
+                Image(systemName: "sparkles")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(LColor.onGold)
+            }
+            .frame(width: 46, height: 46)
+            .overlay(Circle().strokeBorder(LColor.gold.opacity(0.5), lineWidth: 1))
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(name).font(LFont.headline).fontWeight(.semibold)
+                        .foregroundStyle(LColor.ink).lineLimit(1)
+                    Text("AI").font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(LColor.goldText)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(LColor.goldWash, in: Capsule())
+                    Spacer(minLength: 0)
+                    if let at = last?.at {
+                        Text(at, style: .time).font(LFont.caption).foregroundStyle(LColor.inkTertiary)
+                    }
+                }
+                Text(preview)
+                    .font(LFont.subhead).foregroundStyle(LColor.inkSecondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, Space.md).padding(.vertical, Space.sm)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(name), AI assistant. \(preview)")
     }
 }

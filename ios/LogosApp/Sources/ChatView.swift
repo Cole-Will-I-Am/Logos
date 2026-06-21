@@ -198,6 +198,9 @@ struct ChatView: View {
 
 struct MessageBubble: View {
     let message: ChatMessage
+    /// The 1:1 thread shows a delivery/encryption status under each outbound bubble.
+    /// The local AI thread has no relay delivery, so it opts out (`showStatus: false`).
+    var showStatus = true
     let onRetry: () -> Void
 
     var body: some View {
@@ -211,7 +214,7 @@ struct MessageBubble: View {
                     .background(message.mine ? LColor.bubbleMine : LColor.surfaceAlt)
                     .clipShape(RoundedRectangle(cornerRadius: Radius.bubble, style: .continuous))
                     .textSelection(.enabled)
-                if message.mine { statusRow }
+                if message.mine && showStatus { statusRow }
             }
             if !message.mine { Spacer(minLength: 48) }
         }

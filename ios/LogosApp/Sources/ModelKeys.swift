@@ -50,6 +50,26 @@ enum AIConfig {
         set { d.set(newValue.trimmingCharacters(in: .whitespaces), forKey: "ai.ollama.endpoint") }
     }
 
+    /// The Ollama base URL actually used. If no endpoint is set but a key is saved,
+    /// default to Ollama Cloud (ollama.com) — cloud needs only a key, not an endpoint.
+    /// A custom endpoint (your own server) always wins.
+    static var ollamaBase: String {
+        let e = ollamaEndpoint.trimmingCharacters(in: .whitespaces)
+        if !e.isEmpty { return e }
+        return ModelKeys.hasKey(.ollama) ? "https://ollama.com" : ""
+    }
+
+    /// User-chosen display name for their AI assistant (shown in the chat list and at
+    /// the top of the AI chat). Local, non-secret; defaults to "Logos AI".
+    static let defaultAssistantName = "Logos AI"
+    static var assistantName: String {
+        get {
+            let n = d.string(forKey: "ai.assistantName")?.trimmingCharacters(in: .whitespaces)
+            return (n?.isEmpty == false) ? n! : defaultAssistantName
+        }
+        set { d.set(newValue.trimmingCharacters(in: .whitespaces), forKey: "ai.assistantName") }
+    }
+
     /// The provider actually used: if nothing is set up but the device has a free
     /// on-device model, fall back to it — that's the free, private default.
     static var effectiveProvider: AIProvider {
@@ -62,7 +82,7 @@ enum AIConfig {
         switch effectiveProvider {
         case .none: return false
         case .onDevice: return AppleOnDevice.isAvailable
-        case .ollama: return !ollamaEndpoint.isEmpty
+        case .ollama: return !ollamaBase.isEmpty
         case .anthropic, .openai: return ModelKeys.key(effectiveProvider) != nil
         }
     }
