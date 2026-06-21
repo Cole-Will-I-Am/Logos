@@ -1,5 +1,6 @@
 import SwiftUI
 import LogosKit
+import PhotosUI
 
 /// Identity verification — real safety numbers from the Rust core.
 /// Compare the number out-of-band, mark verified, and recover from a legitimate
@@ -14,6 +15,8 @@ struct VerifyView: View {
     @State private var showQR = false
     @State private var showScan = false
     @State private var mismatch = false
+    @State private var photoItem: PhotosPickerItem?
+    @State private var nickname = ""
 
     private var verified: Bool { info?.verified ?? false }
     private var changed: Bool { (info?.keyChanges ?? 0) > 0 }
@@ -29,6 +32,7 @@ struct VerifyView: View {
                 if changed && !verified { changeNotice }
                 safetyNumberCard
                 explanation
+                customizeCard
             }
             .padding(Space.lg)
             .frame(maxWidth: 520).frame(maxWidth: .infinity)
@@ -36,7 +40,15 @@ struct VerifyView: View {
         .logosBackground(watermark: true)
         .navigationTitle("Verify \(peer)")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await refresh() }
+        .task { await refresh(); nickname = session.nicknames[peer] ?? "" }
+        .onChange(of: photoItem) { item in
+            Task {
+                if let data = try? await item?.loadTransferable(type: Data.self), let img = UIImage(data: data) {
+                    session.setAvatar(img, for: peer)
+                }
+            }
+        }
+        .onDisappear { session.setNickname(nickname, for: peer) }
         .sheet(isPresented: $showQR) {
             if let sn = info?.safetyNumber { qrSheet(sn) }
         }
@@ -85,8 +97,11 @@ struct VerifyView: View {
 
     private var header: some View {
         VStack(spacing: Space.sm) {
-            LAvatar(name: peer, size: 72)
-            Text(peer).font(LFont.title3).foregroundStyle(LColor.ink)
+            LAvatar(name: peer, image: session.avatars[peer], size: 72)
+            Text(session.displayName(for: peer)).font(LFont.title3).foregroundStyle(LColor.ink)
+            if session.displayName(for: peer) != peer {
+                Text("@\(peer)").font(LFont.footnote).foregroundStyle(LColor.inkTertiary)
+            }
             if verified {
                 VStack(spacing: 4) {
                     SecurityChip(level: .verified)
@@ -179,6 +194,37 @@ struct VerifyView: View {
                 .font(LFont.footnote).foregroundStyle(LColor.goldText)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var customizeCard: some View {
+        VStack(alignment: .leading, spacing: Space.sm) {
+            Text("THIS DEVICE ONLY").font(LFont.caption).fontWeight(.semibold)
+                .foregroundStyle(LColor.inkTertiary).tracking(0.6)
+            HStack(spacing: Space.sm) {
+                PhotosPicker(selection: $photoItem, matching: .images) {
+                    Label(session.avatars[peer] == nil ? "Set photo" : "Change photo", systemImage: "photo")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.logosSecondary)
+                if session.avatars[peer] != nil {
+                    Button(role: .destructive) { session.removeAvatar(for: peer) } label: {
+                        Label("Remove", systemImage: "trash").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.logosSecondary)
+                }
+            }
+            TextField("Nickname (optional)", text: $nickname)
+                .textInputAutocapitalization(.words)
+                .padding(.horizontal, Space.sm).padding(.vertical, 10)
+                .background(LColor.surfaceAlt)
+                .clipShape(RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
+                .submitLabel(.done)
+                .onSubmit { session.setNickname(nickname, for: peer) }
+            Text("A photo or name you set here is stored only on this device — never shared or uploaded.")
+                .font(LFont.caption).foregroundStyle(LColor.inkTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .cardStyle()
     }
 
     /// "12345 12345 12345 12345 12345 12345" → two rows of three groups.

@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import UIKit
 import LogosKit
 
 /// Delivery state of an outbound message. Drives the bubble status row.
@@ -41,6 +42,9 @@ final class Session: ObservableObject {
     @Published var pinned: Set<String> = []
     @Published var archived: Set<String> = []
     @Published var unread: [String: Int] = [:]
+    // Local, device-only contact customization (never shared / never leaves the device).
+    @Published var nicknames: [String: String] = [:]
+    @Published private(set) var avatars: [String: UIImage] = [:]
     @Published var relayURL: String
     @Published var lastError: String?
 
@@ -69,6 +73,11 @@ final class Session: ObservableObject {
         return dir.appendingPathComponent(name).path
     }
 
+    private var avatarDir: URL { dir.appendingPathComponent("logos-avatars", isDirectory: true) }
+    private func avatarURL(_ peer: String) -> URL {
+        avatarDir.appendingPathComponent("\(Self.slug(peer)).jpg")
+    }
+
     private static func slug(_ s: String) -> String {
         SHA256.hash(data: Data(s.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
     }
@@ -94,6 +103,7 @@ final class Session: ObservableObject {
         username = nil; mailboxId = ""
         conversations = []; messages = [:]; security = [:]; lastError = nil
         online = true; lastSynced = nil; syncing = false
+        pinned = []; archived = []; unread = [:]; nicknames = [:]; avatars = [:]
         relayURL = trimmed
         UserDefaults.standard.set(trimmed, forKey: "relayURL")
         loadHistory()
@@ -169,11 +179,42 @@ final class Session: ObservableObject {
         unread[peer] = nil
         pinned.remove(peer)
         archived.remove(peer)
+        nicknames[peer] = nil
+        avatars[peer] = nil
+        try? FileManager.default.removeItem(at: avatarURL(peer))
         persist()
     }
     /// Most recent activity, for sorting the inbox.
     func lastActivity(_ peer: String) -> Date {
         messages[peer]?.last?.at ?? .distantPast
+    }
+
+    // MARK: - Contact customization (local, device-only)
+
+    /// Custom name if set, otherwise the username.
+    func displayName(for peer: String) -> String {
+        let n = nicknames[peer]?.trimmingCharacters(in: .whitespaces)
+        return (n?.isEmpty == false) ? n! : peer
+    }
+    func setNickname(_ name: String?, for peer: String) {
+        let t = name?.trimmingCharacters(in: .whitespaces)
+        nicknames[peer] = (t?.isEmpty == false) ? t : nil
+        persist()
+    }
+    /// Set a local photo for a contact — stored only on this device (never shared).
+    func setAvatar(_ image: UIImage, for peer: String) {
+        let square = image.squareThumbnail(256)
+        guard let data = square.jpegData(compressionQuality: 0.8) else { return }
+        try? FileManager.default.createDirectory(at: avatarDir, withIntermediateDirectories: true)
+        var url = avatarURL(peer)
+        try? data.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
+        var rv = URLResourceValues(); rv.isExcludedFromBackup = true
+        try? url.setResourceValues(rv)
+        avatars[peer] = square
+    }
+    func removeAvatar(for peer: String) {
+        try? FileManager.default.removeItem(at: avatarURL(peer))
+        avatars[peer] = nil
     }
 
     func send(to peer: String, text: String) {
@@ -267,6 +308,7 @@ final class Session: ObservableObject {
         var pinned: [String]?
         var archived: [String]?
         var unread: [String: Int]?
+        var nicknames: [String: String]?
     }
 
     private func loadHistory() {
@@ -279,6 +321,12 @@ final class Session: ObservableObject {
         pinned = Set(snap.pinned ?? [])
         archived = Set(snap.archived ?? [])
         unread = snap.unread ?? [:]
+        nicknames = snap.nicknames ?? [:]
+        for peer in conversations {
+            if let data = try? Data(contentsOf: avatarURL(peer)), let img = UIImage(data: data) {
+                avatars[peer] = img
+            }
+        }
         // A message still `.sending` at last save never confirmed delivery — surface
         // it as failed-but-retryable rather than a spinner that never resolves.
         messages = snap.messages.mapValues { arr in
@@ -291,7 +339,8 @@ final class Session: ObservableObject {
 
     private func persist() {
         let snap = HistorySnapshot(conversations: conversations, messages: messages, security: security,
-                                   pinned: Array(pinned), archived: Array(archived), unread: unread)
+                                   pinned: Array(pinned), archived: Array(archived), unread: unread,
+                                   nicknames: nicknames)
         do {
             let data = try JSONEncoder().encode(snap)
             var url = URL(fileURLWithPath: historyPath)
@@ -393,6 +442,18 @@ func runBlocking<T>(_ work: @escaping () throws -> T) async throws -> T {
         DispatchQueue.global(qos: .userInitiated).async {
             do { cont.resume(returning: try work()) }
             catch { cont.resume(throwing: error) }
+        }
+    }
+}
+
+extension UIImage {
+    /// Aspect-fill crop to a square of `side` points (for a compact avatar thumbnail).
+    func squareThumbnail(_ side: CGFloat) -> UIImage {
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side))
+        return renderer.image { _ in
+            let scale = max(side / size.width, side / size.height)
+            let w = size.width * scale, h = size.height * scale
+            draw(in: CGRect(x: (side - w) / 2, y: (side - h) / 2, width: w, height: h))
         }
     }
 }

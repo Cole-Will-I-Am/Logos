@@ -211,6 +211,7 @@ extension ButtonStyle where Self == LogosSecondaryButtonStyle {
 /// Deterministic monogram avatar with a thin gold ring. Restrained, warm tints.
 struct LAvatar: View {
     let name: String
+    var image: UIImage? = nil
     var size: CGFloat = 46
 
     private static let tints: [Color] = [
@@ -231,14 +232,23 @@ struct LAvatar: View {
     }
 
     var body: some View {
-        Text(initials)
-            .font(.system(size: size * 0.4, weight: .semibold, design: .serif))
-            .foregroundStyle(tint)
-            .frame(width: size, height: size)
-            .background(tint.opacity(0.16))
-            .clipShape(Circle())
-            .overlay(Circle().strokeBorder(tint.opacity(0.45), lineWidth: 1))
-            .accessibilityHidden(true)
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+                    .frame(width: size, height: size)
+                    .clipShape(Circle())
+                    .overlay(Circle().strokeBorder(LColor.gold.opacity(0.5), lineWidth: 1))
+            } else {
+                Text(initials)
+                    .font(.system(size: size * 0.4, weight: .semibold, design: .serif))
+                    .foregroundStyle(tint)
+                    .frame(width: size, height: size)
+                    .background(tint.opacity(0.16))
+                    .clipShape(Circle())
+                    .overlay(Circle().strokeBorder(tint.opacity(0.45), lineWidth: 1))
+            }
+        }
+        .accessibilityHidden(true)
     }
 }
 

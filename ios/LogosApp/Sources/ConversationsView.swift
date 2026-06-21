@@ -153,13 +153,13 @@ private struct ConversationRow: View {
 
     var body: some View {
         HStack(spacing: Space.sm) {
-            LAvatar(name: peer)
+            LAvatar(name: peer, image: session.avatars[peer])
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     if pinned {
                         Image(systemName: "pin.fill").font(.system(size: 10)).foregroundStyle(LColor.inkTertiary)
                     }
-                    Text(peer).font(LFont.headline).fontWeight(unread > 0 ? .bold : .semibold)
+                    Text(session.displayName(for: peer)).font(LFont.headline).fontWeight(unread > 0 ? .bold : .semibold)
                         .foregroundStyle(LColor.ink).lineLimit(1)
                     securityGlyph
                     Spacer(minLength: 0)

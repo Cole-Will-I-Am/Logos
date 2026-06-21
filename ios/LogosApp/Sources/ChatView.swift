@@ -21,7 +21,7 @@ struct ChatView: View {
             if !session.online { OfflineBanner { session.syncNow() } }
         }
         .animation(Motion.standard, value: session.online)
-        .navigationTitle(peer)
+        .navigationTitle(session.displayName(for: peer))
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { session.setActive(peer) }
         .onDisappear { session.setActive(nil) }
@@ -29,7 +29,7 @@ struct ChatView: View {
             ToolbarItem(placement: .principal) {
                 NavigationLink { VerifyView(peer: peer) } label: {
                     VStack(spacing: 1) {
-                        Text(peer).font(LFont.headline).foregroundStyle(LColor.ink)
+                        Text(session.displayName(for: peer)).font(LFont.headline).foregroundStyle(LColor.ink)
                         titleStatus
                     }
                 }
