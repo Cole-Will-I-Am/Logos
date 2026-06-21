@@ -265,8 +265,8 @@ struct RecoveryPhraseSheet: View {
 
                     if loadError {
                         LBanner(tone: .danger, icon: "xmark.octagon.fill",
-                                title: "No recovery phrase",
-                                message: "This identity was created before recovery phrases existed. Create a new identity to get one.")
+                                title: "Couldn’t load your recovery phrase",
+                                message: "Something went wrong reading your identity. Try reopening Logos; if it persists, your store may be corrupt.")
                     } else {
                         ZStack {
                             wordGrid.blur(radius: revealed ? 0 : 9)
@@ -295,7 +295,7 @@ struct RecoveryPhraseSheet: View {
                         }
                     }
 
-                    Text("To use it: on a new device, choose “Restore from a recovery phrase” and enter your username and these 24 words.")
+                    Text("To use it: on a new device, choose “Restore from a recovery phrase” and enter your username and these words. (Older identities show 48 words instead of 24.)")
                         .font(LFont.caption).foregroundStyle(LColor.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

@@ -251,25 +251,66 @@ mod recovery {
     use super::ClientError;
     use bip39::Mnemonic;
 
-    /// Encode a 32-byte seed as a 24-word English BIP39 phrase.
+    /// What a recovery phrase decodes to. Modern (seed-derived) identities back up as
+    /// a 24-word phrase of their 32-byte master `Seed`. Legacy identities (created
+    /// before seed-derivation, so no seed exists) back up their full 64-byte secret
+    /// as a 48-word phrase (two 24-word BIP39 mnemonics) — `FullKey` — so they can
+    /// still be backed up and restored without losing the identity.
+    pub enum RecoveredSecret {
+        Seed([u8; 32]),
+        FullKey([u8; 64]),
+    }
+
+    /// Encode a 32-byte chunk as a 24-word English BIP39 phrase.
     pub fn seed_to_phrase(seed: &[u8; 32]) -> String {
         Mnemonic::from_entropy(seed)
             .expect("32 bytes is valid BIP39 entropy")
             .to_string()
     }
 
-    /// Decode a recovery phrase back to its 32-byte seed, validating the BIP39
-    /// checksum (catches typos/missing words) and the expected length.
-    pub fn phrase_to_seed(phrase: &str) -> Result<[u8; 32], ClientError> {
+    /// Encode a legacy 64-byte identity secret as a 48-word phrase (two 24-word
+    /// halves), for identities that have no master seed.
+    pub fn key_to_phrase(key: &[u8; 64]) -> String {
+        let mut first = [0u8; 32];
+        first.copy_from_slice(&key[..32]);
+        let mut second = [0u8; 32];
+        second.copy_from_slice(&key[32..]);
+        format!("{} {}", seed_to_phrase(&first), seed_to_phrase(&second))
+    }
+
+    fn one_chunk(phrase: &str) -> Result<[u8; 32], ClientError> {
         let mnemonic =
             Mnemonic::parse_normalized(phrase).map_err(|_| ClientError::InvalidRecoveryPhrase)?;
         let entropy = mnemonic.to_entropy();
         if entropy.len() != 32 {
             return Err(ClientError::InvalidRecoveryPhrase);
         }
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(&entropy);
-        Ok(seed)
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&entropy);
+        Ok(out)
+    }
+
+    /// Decode a 24-word seed phrase to its 32-byte seed (BIP39 checksum-validated).
+    pub fn phrase_to_seed(phrase: &str) -> Result<[u8; 32], ClientError> {
+        one_chunk(phrase)
+    }
+
+    /// Decode a recovery phrase: 24 words → `Seed`, 48 words → `FullKey`. Each
+    /// 24-word half carries its own BIP39 checksum, so typos are caught.
+    pub fn phrase_to_secret(phrase: &str) -> Result<RecoveredSecret, ClientError> {
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        match words.len() {
+            24 => Ok(RecoveredSecret::Seed(one_chunk(phrase)?)),
+            48 => {
+                let first = one_chunk(&words[..24].join(" "))?;
+                let second = one_chunk(&words[24..].join(" "))?;
+                let mut key = [0u8; 64];
+                key[..32].copy_from_slice(&first);
+                key[32..].copy_from_slice(&second);
+                Ok(RecoveredSecret::FullKey(key))
+            }
+            _ => Err(ClientError::InvalidRecoveryPhrase),
+        }
     }
 }
 
@@ -312,26 +353,40 @@ impl Client {
         recovery_phrase: &str,
         password: Option<&str>,
     ) -> Result<Self> {
-        let seed = recovery::phrase_to_seed(recovery_phrase)?;
-        let identity = IdentityKeyPair::from_seed(&seed);
+        // 24 words → a seed-derived identity; 48 words → a legacy full-key identity.
+        let (identity, seed) = match recovery::phrase_to_secret(recovery_phrase)? {
+            recovery::RecoveredSecret::Seed(seed) => {
+                (IdentityKeyPair::from_seed(&seed), Some(seed))
+            }
+            recovery::RecoveredSecret::FullKey(key) => {
+                (IdentityKeyPair::from_secret_bytes(&key), None)
+            }
+        };
         Self::register_identity(
             path.as_ref(),
             server_url,
             username,
             password,
             identity,
-            Some(seed),
+            seed,
         )
     }
 
-    /// The 24-word BIP39 recovery phrase for this identity, or an error if this
-    /// identity predates seed-derivation (legacy stores carry no master seed).
+    /// This identity's recovery phrase: **24 words** for a seed-derived identity, or
+    /// **48 words** (the full 64-byte secret) for a legacy identity that predates
+    /// seed-derivation — so every identity can be backed up without being abandoned.
     pub fn export_recovery_phrase(&self) -> Result<String> {
         match &self.store.identity_seed {
             Some(seed) => Ok(recovery::seed_to_phrase(seed)),
-            None => Err(ClientError::other(
-                "this identity has no recovery phrase (it predates backup support); create a new identity to get one",
-            )),
+            None => {
+                let key: [u8; 64] = self
+                    .store
+                    .identity_secret
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| ClientError::other("corrupt identity secret"))?;
+                Ok(recovery::key_to_phrase(&key))
+            }
         }
     }
 
@@ -987,5 +1042,26 @@ mod recovery_tests {
         // "art", so "abandon" x24 must fail the checksum).
         let phrase = "abandon ".repeat(24);
         assert!(recovery::phrase_to_seed(phrase.trim()).is_err());
+    }
+
+    #[test]
+    fn legacy_full_key_roundtrips_as_48_words() {
+        // Distinct halves so a swap would be caught.
+        let mut key = [0u8; 64];
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let phrase = recovery::key_to_phrase(&key);
+        assert_eq!(phrase.split_whitespace().count(), 48);
+        match recovery::phrase_to_secret(&phrase).unwrap() {
+            recovery::RecoveredSecret::FullKey(k) => assert_eq!(k, key),
+            _ => panic!("48 words must decode to FullKey"),
+        }
+        // A 24-word phrase still decodes to a seed.
+        let seed = [9u8; 32];
+        assert!(matches!(
+            recovery::phrase_to_secret(&recovery::seed_to_phrase(&seed)).unwrap(),
+            recovery::RecoveredSecret::Seed(s) if s == seed
+        ));
     }
 }

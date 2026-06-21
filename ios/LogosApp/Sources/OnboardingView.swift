@@ -179,6 +179,12 @@ struct RestoreView: View {
         phrase.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" })
             .filter { !$0.isEmpty }.count
     }
+    // 24 words = a modern (seed-derived) identity; 48 = an older full-key identity.
+    private var validWords: Bool { wordCount == 24 || wordCount == 48 }
+    private var wordCountHint: String {
+        validWords ? "\(wordCount) words ✓"
+                   : "\(wordCount) words — need 24 (or 48 for an older identity)"
+    }
 
     var body: some View {
         NavigationStack {
@@ -186,7 +192,7 @@ struct RestoreView: View {
                 VStack(alignment: .leading, spacing: Space.lg) {
                     VStack(alignment: .leading, spacing: Space.xs) {
                         Text("Restore your identity").font(LFont.title).foregroundStyle(LColor.ink)
-                        Text("Enter your username and the 24-word recovery phrase you saved. This reclaims your account on this device.")
+                        Text("Enter your username and the recovery phrase you saved (24 words, or 48 for an older identity). This reclaims your account on this device.")
                             .font(LFont.callout).foregroundStyle(LColor.inkSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -219,9 +225,9 @@ struct RestoreView: View {
                             .clipShape(RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
                             .overlay(RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
                                 .strokeBorder(LColor.hairline, lineWidth: 1))
-                        Text("\(wordCount)/24 words")
+                        Text(wordCountHint)
                             .font(LFont.caption)
-                            .foregroundStyle(wordCount == 24 ? LColor.goldText : LColor.inkTertiary)
+                            .foregroundStyle(validWords ? LColor.goldText : LColor.inkTertiary)
                     }
 
                     Button("Restore") {
@@ -229,7 +235,7 @@ struct RestoreView: View {
                         session.restore(username: trimmedName, phrase: phrase, relay: relay)
                     }
                     .buttonStyle(.logosPrimary)
-                    .disabled(trimmedName.isEmpty || wordCount != 24)
+                    .disabled(trimmedName.isEmpty || !validWords)
 
                     if let e = session.lastError {
                         LBanner(tone: .danger, icon: "exclamationmark.triangle.fill",
