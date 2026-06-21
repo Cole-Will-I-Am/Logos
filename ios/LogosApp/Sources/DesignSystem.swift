@@ -151,6 +151,9 @@ extension View {
 struct LogosWatermark: View {
     @Environment(\.colorScheme) private var scheme
     var widthFraction: CGFloat = 0.72
+    /// Vertical center as a fraction of height (0.5 = middle). Lower it on screens
+    /// whose content is centered (e.g. an empty state) so the mark isn't obscured.
+    var yFraction: CGFloat = 0.5
 
     var body: some View {
         GeometryReader { geo in
@@ -161,7 +164,7 @@ struct LogosWatermark: View {
                 .frame(width: min(geo.size.width * widthFraction, 360))
                 .foregroundStyle(LColor.ink)
                 .opacity(scheme == .dark ? 0.07 : 0.055)
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
+                .position(x: geo.size.width / 2, y: geo.size.height * yFraction)
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)

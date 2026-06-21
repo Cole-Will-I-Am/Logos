@@ -11,7 +11,7 @@ struct ConversationsView: View {
         NavigationStack {
             ZStack {
                 LColor.canvas.ignoresSafeArea()
-                LogosWatermark()
+                LogosWatermark(yFraction: 0.30)   // up high so it clears the centered empty-state
                 content
             }
             .navigationTitle(session.username.map { "@\($0)" } ?? "Logos")
