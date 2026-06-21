@@ -8,6 +8,10 @@ the **whole** program in view while we build it phase by phase. Status legend:
 > [`SIGNAL_PLUS_BLUEPRINT.md`](SIGNAL_PLUS_BLUEPRINT.md) (workstreams, release
 > gates, "Signal-plus" definition-of-done). **This file = where we are + what's
 > next; the blueprint = where we're going.**
+>
+> Future capability, not scheduled: [`VOICE_CALLS_ROADMAP.md`](VOICE_CALLS_ROADMAP.md)
+> — 1:1 audio-only E2EE calls (WebRTC + signaling over the existing channel; gated
+> on push). A separate plane from messaging; comes after notifications + hardening.
 
 ## ▶︎ Resuming — immediate next steps (paused here)
 
