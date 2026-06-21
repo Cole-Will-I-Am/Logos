@@ -562,7 +562,11 @@ impl Client {
         match self.store.contacts.get(username) {
             Some(known) if known != identity => {
                 // Record the change and drop any prior verification, then refuse.
-                let v = self.store.verifications.entry(username.to_string()).or_default();
+                let v = self
+                    .store
+                    .verifications
+                    .entry(username.to_string())
+                    .or_default();
                 v.changes += 1;
                 v.verified = false;
                 v.verified_at = None;
@@ -592,11 +596,17 @@ impl Client {
     }
 
     pub fn is_verified(&self, peer: &str) -> bool {
-        self.store.verifications.get(peer).is_some_and(|v| v.verified)
+        self.store
+            .verifications
+            .get(peer)
+            .is_some_and(|v| v.verified)
     }
 
     pub fn verified_at(&self, peer: &str) -> Option<u64> {
-        self.store.verifications.get(peer).and_then(|v| v.verified_at)
+        self.store
+            .verifications
+            .get(peer)
+            .and_then(|v| v.verified_at)
     }
 
     pub fn key_changes(&self, peer: &str) -> u32 {
@@ -608,7 +618,11 @@ impl Client {
         if !self.store.contacts.contains_key(peer) {
             return Err(ClientError::other("no pinned identity to verify yet"));
         }
-        let v = self.store.verifications.entry(peer.to_string()).or_default();
+        let v = self
+            .store
+            .verifications
+            .entry(peer.to_string())
+            .or_default();
         v.verified = true;
         v.verified_at = Some(now());
         self.save()
