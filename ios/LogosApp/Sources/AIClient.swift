@@ -2,6 +2,7 @@ import Foundation
 
 enum AIError: LocalizedError {
     case notConfigured
+    case onDeviceUnavailable
     case http(Int, String)
     case badResponse
     case network(String)
@@ -9,6 +10,7 @@ enum AIError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notConfigured: return "No AI provider is set up. Add a key in Settings → AI."
+        case .onDeviceUnavailable: return "On-device AI isn't available here. Add your own key in Settings → AI, or try on an Apple-Intelligence device running iOS 26."
         case .http(let code, let msg): return "Provider error \(code): \(msg)"
         case .badResponse: return "Couldn't read the provider's response."
         case .network(let m): return m
@@ -23,8 +25,9 @@ enum AIError: LocalizedError {
 /// a cloud provider (see `AIProvider.isCloud`).
 enum AIClient {
     static func complete(system: String, user: String) async throws -> String {
-        switch AIConfig.provider {
+        switch AIConfig.effectiveProvider {
         case .none: throw AIError.notConfigured
+        case .onDevice: return try await AppleOnDevice.complete(system: system, user: user)
         case .anthropic: return try await anthropic(system: system, user: user)
         case .openai: return try await openai(system: system, user: user)
         case .ollama: return try await ollama(system: system, user: user)

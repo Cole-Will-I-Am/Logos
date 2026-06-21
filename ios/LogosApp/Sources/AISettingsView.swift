@@ -4,7 +4,7 @@ import SwiftUI
 /// call the provider directly from the phone — the Logos relay is never involved.
 struct AISettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var provider: AIProvider = AIConfig.provider
+    @State private var provider: AIProvider = AIConfig.effectiveProvider
     @State private var newKey = ""           // entered/replacement key for the active provider
     @State private var ollamaEndpoint = AIConfig.ollamaEndpoint
     @State private var ollamaKey = ""        // optional (Ollama Cloud)
@@ -36,14 +36,18 @@ struct AISettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     } else if provider == .ollama {
                         ollamaFields
+                    } else if provider == .onDevice {
+                        onDeviceInfo
                     }
 
-                    if provider != .none {
+                    if provider != .none && provider != .onDevice {
                         field(label: "MODEL") {
                             TextField(provider.defaultModel, text: $model)
                                 .textInputAutocapitalization(.never).autocorrectionDisabled()
                                 .textFieldStyle(.roundedBorder)
                         }
+                    }
+                    if provider != .none {
                         Button { Task { await runTest() } } label: {
                             HStack { if testing { ProgressView().padding(.trailing, 4) }
                                 Text(testing ? "Testing…" : "Test connection") }
@@ -76,6 +80,13 @@ struct AISettingsView: View {
                 .foregroundStyle(LColor.inkTertiary).tracking(0.6)
             content()
         }
+    }
+
+    private var onDeviceInfo: some View {
+        LBanner(tone: AppleOnDevice.isAvailable ? .neutral : .caution,
+                icon: AppleOnDevice.isAvailable ? "checkmark.shield.fill" : "exclamationmark.triangle.fill",
+                title: AppleOnDevice.isAvailable ? "On-device model ready" : "On-device model unavailable",
+                message: AppleOnDevice.statusText)
     }
 
     private var cloudKeyField: some View {

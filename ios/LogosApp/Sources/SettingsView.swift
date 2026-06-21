@@ -205,8 +205,8 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("AI (bring your own key)").font(LFont.body).foregroundStyle(LColor.ink)
                     Text(AIConfig.configured
-                         ? "\(AIConfig.provider.label) · keys stay on this device"
-                         : "Off — add your own Anthropic / OpenAI / Ollama key")
+                         ? "\(AIConfig.effectiveProvider.label) · processed on your device or your provider"
+                         : "Off — use on-device, or add your own Anthropic / OpenAI / Ollama key")
                         .font(LFont.footnote).foregroundStyle(LColor.inkSecondary)
                         .lineLimit(2)
                 }

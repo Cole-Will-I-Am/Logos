@@ -36,7 +36,7 @@ struct AICatchUpSheet: View {
     }
 
     private var consent: some View {
-        let p = AIConfig.provider
+        let p = AIConfig.effectiveProvider
         return VStack(alignment: .leading, spacing: Space.md) {
             if p.isCloud {
                 LBanner(tone: .caution, icon: "exclamationmark.shield.fill",

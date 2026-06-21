@@ -4,12 +4,13 @@ import Security
 /// AI providers a user can bring their own key for. Privacy-ordered: on-device/your
 /// own Ollama server keeps content private; cloud providers see what you send.
 enum AIProvider: String, CaseIterable, Identifiable {
-    case none, ollama, anthropic, openai
+    case none, onDevice, ollama, anthropic, openai
     var id: String { rawValue }
     var label: String {
         switch self {
         case .none: return "Off"
-        case .ollama: return "Ollama (your server / on-device)"
+        case .onDevice: return "On-device (Apple, private)"
+        case .ollama: return "Ollama (your server)"
         case .anthropic: return "Anthropic (Claude)"
         case .openai: return "OpenAI"
         }
@@ -21,7 +22,7 @@ enum AIProvider: String, CaseIterable, Identifiable {
         case .anthropic: return "claude-opus-4-8"
         case .openai: return "gpt-4o"
         case .ollama: return "llama3.1"
-        case .none: return ""
+        case .none, .onDevice: return ""
         }
     }
     var needsKey: Bool { self == .anthropic || self == .openai }
@@ -49,12 +50,20 @@ enum AIConfig {
         set { d.set(newValue.trimmingCharacters(in: .whitespaces), forKey: "ai.ollama.endpoint") }
     }
 
-    /// Whether the active provider is usable (has the key/endpoint it needs).
+    /// The provider actually used: if nothing is set up but the device has a free
+    /// on-device model, fall back to it — that's the free, private default.
+    static var effectiveProvider: AIProvider {
+        if provider == .none, AppleOnDevice.isAvailable { return .onDevice }
+        return provider
+    }
+
+    /// Whether the effective provider is usable (has the key/endpoint/model it needs).
     static var configured: Bool {
-        switch provider {
+        switch effectiveProvider {
         case .none: return false
+        case .onDevice: return AppleOnDevice.isAvailable
         case .ollama: return !ollamaEndpoint.isEmpty
-        case .anthropic, .openai: return ModelKeys.key(provider) != nil
+        case .anthropic, .openai: return ModelKeys.key(effectiveProvider) != nil
         }
     }
 }
