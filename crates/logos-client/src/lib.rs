@@ -290,11 +290,6 @@ mod recovery {
         Ok(out)
     }
 
-    /// Decode a 24-word seed phrase to its 32-byte seed (BIP39 checksum-validated).
-    pub fn phrase_to_seed(phrase: &str) -> Result<[u8; 32], ClientError> {
-        one_chunk(phrase)
-    }
-
     /// Decode a recovery phrase: 24 words → `Seed`, 48 words → `FullKey`. Each
     /// 24-word half carries its own BIP39 checksum, so typos are caught.
     pub fn phrase_to_secret(phrase: &str) -> Result<RecoveredSecret, ClientError> {
@@ -1028,20 +1023,23 @@ mod recovery_tests {
         let seed = [7u8; 32];
         let phrase = recovery::seed_to_phrase(&seed);
         assert_eq!(phrase.split_whitespace().count(), 24);
-        assert_eq!(recovery::phrase_to_seed(&phrase).unwrap(), seed);
+        match recovery::phrase_to_secret(&phrase).unwrap() {
+            recovery::RecoveredSecret::Seed(s) => assert_eq!(s, seed),
+            _ => panic!("24 words must decode to a seed"),
+        }
     }
 
     #[test]
     fn invalid_phrase_is_rejected() {
         // Not real wordlist words.
         assert!(matches!(
-            recovery::phrase_to_seed("not a valid recovery phrase at all please"),
+            recovery::phrase_to_secret("not a valid recovery phrase at all please"),
             Err(ClientError::InvalidRecoveryPhrase)
         ));
         // Valid words but a wrong checksum (canonical all-zero entropy ends in
         // "art", so "abandon" x24 must fail the checksum).
         let phrase = "abandon ".repeat(24);
-        assert!(recovery::phrase_to_seed(phrase.trim()).is_err());
+        assert!(recovery::phrase_to_secret(phrase.trim()).is_err());
     }
 
     #[test]
