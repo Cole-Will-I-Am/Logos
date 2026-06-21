@@ -48,38 +48,54 @@ audit**. Hybridizing the sealed-sender envelope for PQ sender-metadata is also o
 
 ## ▶︎ Resuming — current state + next steps (handoff)
 
-**Live now:** iOS app on TestFlight through **v0.1.17** (no-Mac CI pipeline; ASC creds,
-app record, signing — see `CI_TESTFLIGHT_SETUP.md`). Public relay
-**relay.manticthink.com** deployed (Cloudflare tunnel; persistent + red-team-hardened).
-`main` is the built/verified branch — build from `main`. Whole-repo VPS backups in
-`/srv/backups/logos/`. The full red-team report is `docs/REDTEAM-2026-06.md` (kept LOCAL,
-not committed — it lists open follow-ups).
+**Live now:** iOS app on TestFlight through **v0.1.18** (no-Mac CI pipeline; ASC creds,
+app record, signing — see `CI_TESTFLIGHT_SETUP.md` and the reusable `ios-testflight`
+skill). Public relay **relay.manticthink.com** deployed (Cloudflare tunnel; persistent +
+red-team-hardened). `main` is the built/verified branch — build from `main`. Whole-repo VPS
+backups in `/srv/backups/logos/`. The full 1:1 red-team report is `docs/REDTEAM-2026-06.md`
+(kept LOCAL, not committed — it lists open follow-ups).
 
 **Shipped to date:** 1:1 E2EE (PQXDH + Double Ratchet + sealed sender + TOFU), identity
 **recovery phrase** (24-word seed; 48-word legacy full-key), **at-rest encryption**
 (device Keychain key for store + history), **persistent relay**, **local contacts**, the
-**full red-team remediation** (all HIGH/MEDIUM + cheap LOW — relay H1/H2, client
-M3/M4, iOS M2/L4, etc.), **BYOK AI** (Anthropic/OpenAI/Ollama, device→provider, relay
-never in the path) + **on-device AI default** (Apple Foundation Models) + **1:1 catch-up
-summaries**.
+**full 1:1 red-team remediation** (all HIGH/MEDIUM + cheap LOW), **BYOK AI**
+(Anthropic/OpenAI/Ollama, device→provider, relay never in the path) + **on-device AI
+default** (Apple Foundation Models) + **1:1 catch-up summaries**, and now **E2EE group
+chats — sender-key v1 core** (P4.0a static + P4.0b membership/rekey-on-removal) + the
+**M1 prekey-replenishment** prereq (0.1.18). **Caveat: group chats are CORE + PROTOCOL
+only — there is NO group UI yet** (the FFI doesn't surface groups; iOS app is unchanged
+for users, 1:1 wire byte-identical). Group chats were adversarially reviewed (5-reviewer
+workflow; 13 confirmed → 8 fixed, 4 documented as v1 limitations).
 
 **Agreed next build order (resume here):**
 
 1. ✅ On-device AI provider (0.1.17).
-2. **Group chats — sender-key v1** (see [`GROUP_CHAT_PLAN.md`](GROUP_CHAT_PLAN.md), P4):
-   `logos-proto` wire types + sender-key crypto + static-group create/send/recv (Rust
-   tests) → membership/admins + rekey-on-removal → iOS UI. **Fold in the M1
-   prekey-replenishment prereq** (groups multiply pairwise handshakes). Largest +
-   most security-sensitive build; stage + CI-verify.
-3. **AI-1 — on-device semantic search + memory** (see
-   [`AI_NATIVE_BLUEPRINT.md`](AI_NATIVE_BLUEPRINT.md)): grounded, source-cited search
-   over local history on the existing BYOK/on-device plumbing.
+2. ✅ **Group chats — sender-key v1 core**: P4.0a (static create/send/recv) + P4.0b
+   (add/remove + **rekey-on-removal**, admins, rename) + M1 prekey replenishment. On
+   `main`, shipped in 0.1.18. See [`GROUP_CHAT_PLAN.md`](GROUP_CHAT_PLAN.md) → "Implemented
+   status" + "Known limitations".
+3. 🔜 **P4.0c — iOS group UI** (makes groups user-visible — the remaining group piece):
+   expose groups through `logos-ffi` (`create_group`/`send_group`/`add_member`/
+   `remove_member`/`groups`/`group_members`; extend the FFI `IncomingMessage` with the
+   group id) → SwiftUI create-group (contacts picker) / group chat view (sender name per
+   message) / member list + admin controls.
+4. ⏳ **AI-1 — on-device semantic search + memory** (see
+   [`AI_NATIVE_BLUEPRINT.md`](AI_NATIVE_BLUEPRINT.md)): grounded, source-cited search over
+   local history on the existing BYOK/on-device plumbing.
+5. ⏳ **P4.1 — MLS** (openmls): replace the sender-key core for O(log N) rekey,
+   post-compromise security, and transcript consistency; relay becomes an ordered
+   delivery service.
 
-**Open security follow-ups (red-team `REDTEAM-2026-06.md`, tracked):** M1 client
-prekey-lifecycle (replenish + signed-prekey rotation; the relay free-drain is already
-fixed) · **P3 key transparency** (the F-02 endgame — do before any public "trust us"
-claim) · L1 quadratic skipped-key eviction · L2 sealed-sender PQ metadata · L7 pin CI
-build tools · **external professional crypto audit = the real production gate.**
+**Group-chat v1 known limitations (documented in `GROUP_CHAT_PLAN.md`; deferred — none a
+confidentiality break):** simultaneous mutual session init (a pre-existing 1:1 issue —
+needs session tie-break); best-effort fan-out with no delivery acks; the 5-poll quarantine
+cap vs deferred sender-key arrival; bootstrap-race early-message loss.
+
+**Open security follow-ups (tracked):** M1 client prekey-replenishment ✅ DONE (signed-prekey
+*rotation* still open) · **P3 key transparency** (the F-02 endgame — do before any public
+"trust us" claim) · L1 quadratic skipped-key eviction · L2 sealed-sender PQ metadata · L7
+pin CI build tools · the group-chat limitations above · **external professional crypto audit
+= the real production gate.**
 
 ## ▶︎ Security-review follow-ups (open — from PR #1 `security-review-fixes`)
 
@@ -143,7 +159,7 @@ with `cargo test --workspace`; the iOS build is `gh workflow run build` (while p
 | **P1.5 — Security-review hardening** | transactional decrypt, cert↔identity binding + TOFU, one-time ML-KEM, domain-separated sigs, panic removal, persisted server key | ✅ |
 | **P2 — iOS app** | `logos-ffi` (UniFFI) ✅ → `LogosKit.xcframework` + SwiftUI app (source ✅, CI build validating) → deploy relay (localhost ✅, public TLS pending) → TestFlight (needs signing) | 🚧 |
 | **P3 — Key transparency** | append-only verifiable log of identity keys + client auditing/gossip (the real fix for relay-as-cert-authority; upgrades TOFU) | ⏳ |
-| **P4 — Groups (E2EE)** | sender-key small groups (v1) → `openmls`/MLS (P4.1) — design in [`GROUP_CHAT_PLAN.md`](GROUP_CHAT_PLAN.md). E2EE, NOT Telegram-style server-readable | ⏳ |
+| **P4 — Groups (E2EE)** | sender-key v1: **P4.0a static** ✅ + **P4.0b membership/rekey-on-removal** ✅ (core, 0.1.18) · **P4.0c iOS group UI** 🔜 · **P4.1 MLS** (openmls) ⏳ — [`GROUP_CHAT_PLAN.md`](GROUP_CHAT_PLAN.md). E2EE, NOT Telegram server-readable | 🚧 |
 | **P5 — Advanced privacy** | onion/mixnet transport, blinded/rotating mailbox ids, PSI contact discovery, multi-device | ⏳ |
 | **AI-native track** | private AI layer — design in [`AI_NATIVE_BLUEPRINT.md`](AI_NATIVE_BLUEPRINT.md). **AI-0 = BYOK** (user's own Anthropic/OpenAI/Ollama key, device→provider direct, relay never in the AI path; Keychain-stored) + 1:1 catch-up summary → local search/memory → group catch-up. Relay stays blind; cloud AI = explicit per-use consent | 🔜 |
 | **Cross-cutting hardening** | redb relay persistence + TTL, Argon2id client-store encryption, prekey-fetch rate limits, full zeroization, reproducible-build/binary-transparency CI | ⏳ |

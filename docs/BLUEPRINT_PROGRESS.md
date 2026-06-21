@@ -21,7 +21,7 @@ This file tracks implementation status for each workstream item in
 | Relay persistence | PARTIAL | JSON snapshot of directory, mailboxes, next_id loaded/saved atomically; redb is the future production target. | (pending commit) |
 | TTL sweep | DONE | Envelopes stamped with expiry; background task sweeps every 60s. | (pending commit) |
 | Rate limits + abuse controls | PARTIAL | Per-mailbox posting token bucket; per-IP limits require connect-info plumbing (tracked). | (pending commit) |
-| Prekey replenishment | DONE | `/v1/replenish` endpoint + `ReplenishRequest` wire type. | (pending commit) |
+| Prekey replenishment | DONE | `/v1/replenish` endpoint + `ReplenishRequest`; **client-side M1 replenishment shipped** (low-watermark top-up + pending-publish retry-until-confirmed). Signed-prekey *rotation* still TODO. | main (0.1.18) |
 | Request/response size caps | DONE | Relay request body cap + client response body cap + fetch envelope cap. | (pending commit) |
 | CI supply-chain hardening | DONE | SHA-pinned actions, pinned Rust 1.96.0, cargo-deny + cargo-audit steps, deny.toml. | (pending commit) |
 
@@ -71,7 +71,7 @@ This file tracks implementation status for each workstream item in
 | Item | Status | Note | Commit(s) |
 |------|--------|------|-----------|
 | Multi-device | TODO | | |
-| Groups / MLS | TODO | | |
+| Groups / MLS | PARTIAL | E2EE **sender-key v1** core shipped — P4.0a static + P4.0b membership/**rekey-on-removal** (`logos-ratchet::senderkey`; see `GROUP_CHAT_PLAN.md`). iOS group UI (P4.0c) + MLS/`openmls` (P4.1) TODO. Adversarially reviewed; v1 limitations documented. | main (0.1.18) |
 | Attachments | TODO | | |
 | Backups/recovery | TODO | | |
 | Push notification hardening | TODO | | |
