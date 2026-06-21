@@ -5,7 +5,7 @@
 //!
 //! EXPERIMENTAL — UNAUDITED.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -40,6 +40,13 @@ const MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
 /// Max envelopes returned in a single `/v1/fetch` call. Extra envelopes remain
 /// on the server and are fetched on the next poll.
 const MAX_FETCH_ENVELOPES: usize = 1_000;
+
+/// Drop a quarantined (no-session) envelope after this many poll attempts so a peer
+/// can't permanently pin a victim's mailbox with undeliverable messages (red-team M4).
+const MAX_QUARANTINE_ATTEMPTS: u32 = 5;
+
+/// Bound on remembered consumed-initial fingerprints (red-team M3 replay protection).
+const MAX_SEEN_INITIALS: usize = 512;
 
 /// Errors from the client engine. The variants the UI must treat differently are
 /// **typed** (not stringly): `IdentityChanged` drives the high-friction identity
@@ -101,6 +108,25 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Stable fingerprint of an inbound initial (handshake) message, for replay
+/// detection (red-team M3). A replayed envelope is byte-identical → same
+/// fingerprint; a genuine re-handshake uses a fresh ephemeral → different one.
+fn initial_fingerprint(
+    initial: &InitialMessage,
+    ratchet: &logos_ratchet::RatchetMessage,
+) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"logos-initial-fp-v1");
+    if let Ok(b) = serde_json::to_vec(initial) {
+        h.update(&b);
+    }
+    if let Ok(b) = serde_json::to_vec(ratchet) {
+        h.update(&b);
+    }
+    h.finalize().into()
 }
 
 /// Blocking HTTP client with bounded connect/total timeouts so a slow or hung
@@ -197,6 +223,16 @@ struct Store {
     verifications: HashMap<String, Verification>,
     server_vk: Option<[u8; 32]>,
     cert: Option<SenderCertificate>,
+    /// Fingerprints of consumed initial (handshake) messages, so a replay of a
+    /// captured initial is rejected even after `reset_session` clears the live
+    /// session (red-team M3). Bounded FIFO.
+    #[serde(default)]
+    seen_initials: VecDeque<[u8; 32]>,
+    /// Per-envelope-id quarantine attempt counts; an undeliverable (no-session)
+    /// envelope is ACK-dropped after `MAX_QUARANTINE_ATTEMPTS` so a peer can't pin
+    /// the mailbox forever (red-team M4).
+    #[serde(default)]
+    quarantine: HashMap<u64, u32>,
 }
 
 impl Drop for Store {
@@ -480,6 +516,8 @@ impl Client {
             verifications: HashMap::new(),
             server_vk: Some(server_vk.verifying_key),
             cert: None,
+            seen_initials: VecDeque::new(),
+            quarantine: HashMap::new(),
         };
         let mut me = Self {
             store,
@@ -536,13 +574,15 @@ impl Client {
     }
 
     fn identity(&self) -> IdentityKeyPair {
-        let arr: [u8; 64] = self
+        let mut arr: [u8; 64] = self
             .store
             .identity_secret
             .as_slice()
             .try_into()
             .expect("64-byte identity secret");
-        IdentityKeyPair::from_secret_bytes(&arr)
+        let kp = IdentityKeyPair::from_secret_bytes(&arr);
+        arr.zeroize(); // L3: clear the transient full-secret copy
+        kp
     }
 
     fn identity_dh_priv(&self) -> [u8; 32] {
@@ -729,34 +769,46 @@ impl Client {
         let mut out = Vec::new();
         let mut acked: Vec<u64> = Vec::new();
 
-        for stored in resp.envelopes {
+        for stored in &resp.envelopes {
             match self.process_envelope(&stored.envelope, &server_vk, &dh_priv) {
                 // A new message: deliver to the caller and ACK (delete) it.
                 Ok(Some(inc)) => {
                     out.push(inc);
                     acked.push(stored.id);
+                    self.store.quarantine.remove(&stored.id);
                 }
                 // A handled duplicate/replay (already-consumed message, or a prekey
                 // re-establishment for a session we already have): nothing to show,
                 // but ACK it so it cannot stick on the server forever and be
                 // re-fetched on every poll.
-                Ok(None) => acked.push(stored.id),
+                Ok(None) => {
+                    acked.push(stored.id);
+                    self.store.quarantine.remove(&stored.id);
+                }
                 // Undecryptable for a recoverable reason (e.g. a Normal message that
                 // arrived ahead of its establishing prekey message): quarantine —
-                // leave it on the server (not ACKed) for a later attempt.
-                Err(_) => {}
+                // leave it on the server for a later attempt. M4: but bound the
+                // attempts so a peer can't pin the mailbox with envelopes that will
+                // NEVER have a session — ACK-drop after MAX_QUARANTINE_ATTEMPTS.
+                Err(_) => {
+                    let n = self.store.quarantine.entry(stored.id).or_insert(0);
+                    *n += 1;
+                    if *n >= MAX_QUARANTINE_ATTEMPTS {
+                        acked.push(stored.id);
+                        self.store.quarantine.remove(&stored.id);
+                    }
+                }
             }
         }
-        // State (advanced ratchets, consumed prekeys) is durably persisted before
-        // we ACK — so a message is never deleted on the server before we can
-        // re-derive it.
-        self.save()?;
+        // L5: persist advanced state (ratchets, consumed prekeys, quarantine counts)
+        // before ACKing. A save FAILURE must not silently drop the just-decrypted
+        // batch: still return `out` to the caller (the UI persists its own history),
+        // and skip the ACK so the envelopes remain on the server for a later attempt.
+        let saved = self.save().is_ok();
 
-        // ACK is best-effort: the messages in `out` are already durably processed,
-        // so a failed ACK must NOT discard them (that would silently lose already-
-        // decrypted messages). Un-ACKed ids simply remain on the server and are
-        // re-fetched next time; already-consumed ones then ACK-drop harmlessly.
-        if !acked.is_empty() {
+        // ACK is best-effort and only when state was durably saved: the messages in
+        // `out` are already processed, so a failed ACK must NOT discard them.
+        if saved && !acked.is_empty() {
             let ack_sig = identity.sign(&ack_signed_bytes(&id_pub, &acked)).to_vec();
             let _ = self
                 .http
@@ -808,7 +860,15 @@ impl Client {
                 if self.store.sessions.contains_key(&from) {
                     return Ok(None);
                 }
+                // M3: reject a replayed initial even after `reset_session` cleared the
+                // live session — otherwise a relay could redeliver an old captured
+                // handshake and lock the conversation onto stale state.
+                let fp = initial_fingerprint(&initial, &ratchet);
+                if self.store.seen_initials.contains(&fp) {
+                    return Ok(None);
+                }
                 let text = self.establish_and_decrypt(&cert, initial, ratchet)?;
+                self.remember_initial(fp);
                 Ok(Some(Incoming { from, text }))
             }
             OuterMessage::Normal { ratchet } => {
@@ -926,6 +986,18 @@ impl Client {
     pub fn reset_session(&mut self, peer: &str) -> Result<()> {
         self.store.sessions.remove(peer);
         self.save()
+    }
+
+    /// Record a consumed initial-message fingerprint (bounded FIFO) for M3 replay
+    /// rejection. Persisted with the next `save()`.
+    fn remember_initial(&mut self, fp: [u8; 32]) {
+        if self.store.seen_initials.contains(&fp) {
+            return;
+        }
+        self.store.seen_initials.push_back(fp);
+        while self.store.seen_initials.len() > MAX_SEEN_INITIALS {
+            self.store.seen_initials.pop_front();
+        }
     }
 
     fn establish_and_decrypt(

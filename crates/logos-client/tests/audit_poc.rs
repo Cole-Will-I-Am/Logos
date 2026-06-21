@@ -113,6 +113,7 @@ fn raw_ack_as(url: &str, identity: IdentityPublic, ids: Vec<u64>, signer: &Ident
         .unwrap();
 }
 
+#[allow(dead_code)]
 fn raw_directory(url: &str, who: &str) -> DirectoryResponse {
     reqwest::blocking::Client::new()
         .get(format!("{url}/v1/directory/{who}"))
@@ -122,31 +123,29 @@ fn raw_directory(url: &str, who: &str) -> DirectoryResponse {
         .unwrap()
 }
 
-/// V3 (characterization of a KNOWN, unfixed limitation): an UNAUTHENTICATED,
-/// fetch-only caller drains the one-time prekey pools. This documents current
-/// behavior — server-side rate-limiting / prekey replenishment is tracked work.
-/// After the V2 fix the worst consequence (session reset via replay) is closed;
-/// the residual effect is forcing new sessions onto the reusable last-resort KEM.
+fn raw_directory_status(url: &str, who: &str) -> u16 {
+    reqwest::blocking::Client::new()
+        .get(format!("{url}/v1/directory/{who}"))
+        .send()
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+/// V3 (now asserts the FIX, red-team M1): directory reads are rate-limited, so an
+/// unauthenticated caller can't drain the one-time prekey pools for free — a rapid
+/// run of GETs hits HTTP 429 before the pools are exhausted.
 #[test]
 fn poc_v3_unauthenticated_directory_drains_one_time_prekeys() {
     let url = start_relay();
     let _bob = Client::create(tmp("v3-bob"), &url, "v3bob", Some("test-password")).unwrap();
 
-    // 20 one-time X25519 + 10 one-time ML-KEM prekeys were registered.
-    // Drain them with plain GETs — no auth, no message ever sent.
-    let mut last = raw_directory(&url, "v3bob");
-    for _ in 0..40 {
-        last = raw_directory(&url, "v3bob");
-    }
-    // After draining: no one-time X25519 prekey, and the KEM prekey has fallen
-    // back to the reusable last-resort (id 0).
+    let statuses: Vec<u16> = (0..30)
+        .map(|_| raw_directory_status(&url, "v3bob"))
+        .collect();
     assert!(
-        last.bundle.one_time_prekey.is_none(),
-        "attacker could NOT drain one-time X25519 prekeys"
-    );
-    assert_eq!(
-        last.bundle.kem_prekey.id, 0,
-        "attacker could NOT force the reusable last-resort KEM prekey"
+        statuses.contains(&429),
+        "directory reads must be rate-limited to prevent free prekey draining; got {statuses:?}"
     );
 }
 
@@ -185,10 +184,10 @@ fn poc_v1_redelivered_normal_message_is_stuck_forever() {
     );
 }
 
-/// V2: replaying the initial PREKEY envelope resets/clobbers an established
-/// session when the handshake used the reusable last-resort KEM prekey (no
-/// one-time X25519 prekey). A consumed first message is redelivered as "new",
-/// and subsequent real messages then fail — a relay can break any conversation.
+/// V2 (now asserts the FIX): a replayed initial PREKEY envelope is never redelivered
+/// and never clobbers the conversation — dropped by the no-clobber guard while the
+/// session is live, and rejected by the M3 seen-initials guard even after
+/// `reset_session` clears the local session.
 #[test]
 fn poc_v2_prekey_replay_resets_established_session() {
     let url = start_relay();
@@ -199,37 +198,30 @@ fn poc_v2_prekey_replay_resets_established_session() {
     let bob_id = identity_from_store(&bob_path);
     let bob_pub = bob_id.public();
 
-    // Drain Bob's one-time prekeys so the session uses last-resort KEM + no OTK.
-    for _ in 0..40 {
-        raw_directory(&url, "v2bob");
-    }
-
-    alice.send("v2bob", "m1").unwrap(); // prekey msg using last-resort path
+    alice.send("v2bob", "m1").unwrap(); // prekey msg
     let captured = raw_fetch(&url, &bob_id); // capture the prekey envelope
     assert_eq!(captured.len(), 1);
-    assert_eq!(bob.recv().unwrap()[0].text, "m1"); // establish + consume + ack
+    assert_eq!(bob.recv().unwrap()[0].text, "m1"); // establish + record seen-initial
 
     alice.send("v2bob", "m2").unwrap(); // advance the session
     assert_eq!(bob.recv().unwrap()[0].text, "m2");
 
-    // Replay the original prekey envelope (unauthenticated post).
+    // Replay the original prekey envelope while the session is LIVE: dropped by the
+    // no-clobber guard, not redelivered.
     raw_post(&url, &bob_pub, &captured[0].envelope);
-    let replayed = bob.recv().unwrap();
-
-    // BUG 1: the already-seen first message is redelivered as a brand-new message.
     assert!(
-        replayed.is_empty(),
-        "BUG: prekey replay redelivered an old message as new: {:?}",
-        replayed.iter().map(|m| &m.text).collect::<Vec<_>>()
+        bob.recv().unwrap().is_empty(),
+        "live-session prekey replay must be dropped"
     );
 
-    // BUG 2: the established session was clobbered, so further real messages on
-    // the original session no longer decrypt.
-    alice.send("v2bob", "m3").unwrap();
-    assert_eq!(
-        bob.recv().unwrap().first().map(|m| m.text.as_str()),
-        Some("m3"),
-        "BUG: session was reset by the replay; subsequent messages are lost"
+    // After reset_session (e.g. the contact reinstalled), the SAME replay must still
+    // be rejected by the M3 seen-initials guard rather than re-installed onto stale
+    // state — a relay cannot redeliver an old handshake.
+    bob.reset_session("v2alice").unwrap();
+    raw_post(&url, &bob_pub, &captured[0].envelope);
+    assert!(
+        bob.recv().unwrap().is_empty(),
+        "prekey replay after reset_session must be rejected (M3)"
     );
 }
 
