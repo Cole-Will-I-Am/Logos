@@ -4,6 +4,11 @@ Logos implements the "Sealed" ultra-secure-messenger blueprint. This file keeps
 the **whole** program in view while we build it phase by phase. Status legend:
 ✅ done · 🔜 next · ⏳ planned · 🔒 gate.
 
+> The detailed security *target* lives in
+> [`SIGNAL_PLUS_BLUEPRINT.md`](SIGNAL_PLUS_BLUEPRINT.md) (workstreams, release
+> gates, "Signal-plus" definition-of-done). **This file = where we are + what's
+> next; the blueprint = where we're going.**
+
 ## ▶︎ Resuming — immediate next steps (paused here)
 
 Picked up in this order when work resumes:

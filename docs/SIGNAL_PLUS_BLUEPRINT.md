@@ -6,6 +6,10 @@
 > **experimental, unaudited, and unsuitable for real secrets** until the audit gates
 > below are closed.
 
+**Related docs:** [`ROADMAP.md`](ROADMAP.md) tracks current phase status and the
+immediate next steps; this blueprint is the detailed security *target* they build
+toward. [`DESIGN.md`](DESIGN.md) covers product/UX.
+
 ## 1. North-star claim
 
 Logos should not claim to be "more encrypted than Signal." Signal already has a
@@ -44,7 +48,11 @@ Already implemented or partially implemented:
 - Authenticated mailbox fetch.
 - ACK-based deletion after durable client processing.
 - TOFU identity pinning and identity-change refusal.
-- iOS/SwiftUI client scaffold over the Rust core.
+- iOS/SwiftUI client over the Rust core (UniFFI), now well past a scaffold:
+  premium UI; honest send/delivery + identity-change states; **identity
+  verification** (real safety numbers, QR scan-to-verify, reinstall recovery);
+  on-device chat-history persistence; relay/connectivity status; inbox (search,
+  unread, pin, archive); local contact photos/nicknames; no-Mac TestFlight pipeline.
 
 Known blockers that prevent real-world security claims:
 
