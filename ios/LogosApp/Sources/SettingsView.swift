@@ -7,6 +7,7 @@ struct SettingsView: View {
     @State private var relayMode = 0       // 0 = public, 1 = private relay
     @State private var privateURL = ""
     @State private var showMyQR = false
+    @State private var showPhrase = false
 
     var body: some View {
         ScrollView {
@@ -24,6 +25,7 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showMyQR) { myQRSheet }
+        .sheet(isPresented: $showPhrase) { RecoveryPhraseSheet().environmentObject(session) }
         .onAppear {
             relayMode = session.relayURL == Session.defaultRelay ? 0 : 1
             privateURL = relayMode == 1 ? session.relayURL : ""
@@ -143,6 +145,13 @@ struct SettingsView: View {
                     }
                     .font(LFont.footnote.weight(.medium)).foregroundStyle(LColor.goldText)
                 }
+                Button { showPhrase = true } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "key.horizontal.fill")
+                        Text("Back up your identity")
+                    }
+                    .font(LFont.footnote.weight(.medium)).foregroundStyle(LColor.goldText)
+                }
             }
         }
         .frame(maxWidth: .infinity)
@@ -235,5 +244,91 @@ private struct SettingsRow: View {
             Spacer(minLength: 0)
         }
         .padding(Space.md)
+    }
+}
+
+/// Reveal + back up the 24-word identity recovery phrase. Blurred until tapped.
+struct RecoveryPhraseSheet: View {
+    @EnvironmentObject var session: Session
+    @Environment(\.dismiss) private var dismiss
+    @State private var words: [String] = []
+    @State private var revealed = false
+    @State private var copied = false
+    @State private var loadError = false
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: Space.lg) {
+                    LBanner(tone: .caution, icon: "exclamationmark.shield.fill",
+                            title: "Anyone with these words is you",
+                            message: "They can restore your account and read new messages. Write them on paper and keep them offline — don’t screenshot them or save them to the cloud, and never share them.")
+
+                    if loadError {
+                        LBanner(tone: .danger, icon: "xmark.octagon.fill",
+                                title: "No recovery phrase",
+                                message: "This identity was created before recovery phrases existed. Create a new identity to get one.")
+                    } else {
+                        ZStack {
+                            wordGrid.blur(radius: revealed ? 0 : 9)
+                            if !revealed {
+                                Button { withAnimation(Motion.standard) { revealed = true } } label: {
+                                    Label("Tap to reveal", systemImage: "eye.fill")
+                                        .font(LFont.subhead.weight(.semibold))
+                                        .foregroundStyle(LColor.goldText)
+                                        .padding(Space.sm)
+                                        .background(LColor.surface, in: Capsule())
+                                }
+                            }
+                        }
+                        if revealed {
+                            Button {
+                                UIPasteboard.general.string = words.joined(separator: " ")
+                                Haptic.tap(); withAnimation(Motion.micro) { copied = true }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                    Text(copied ? "Copied — paste somewhere safe, then clear it" : "Copy phrase")
+                                }
+                                .font(LFont.footnote.weight(.medium)).foregroundStyle(LColor.goldText)
+                                .frame(maxWidth: .infinity)
+                            }
+                        }
+                    }
+
+                    Text("To use it: on a new device, choose “Restore from a recovery phrase” and enter your username and these 24 words.")
+                        .font(LFont.caption).foregroundStyle(LColor.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(Space.lg).frame(maxWidth: 520).frame(maxWidth: .infinity)
+            }
+            .logosBackground()
+            .navigationTitle("Recovery phrase").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .task {
+                if let p = await session.recoveryPhrase() {
+                    words = p.split(separator: " ").map(String.init)
+                } else {
+                    loadError = true
+                }
+            }
+        }
+    }
+
+    private var wordGrid: some View {
+        let cols = [GridItem(.flexible()), GridItem(.flexible())]
+        return LazyVGrid(columns: cols, spacing: Space.xs) {
+            ForEach(Array(words.enumerated()), id: \.offset) { i, w in
+                HStack(spacing: Space.xs) {
+                    Text("\(i + 1)").font(LFont.caption.monospaced())
+                        .foregroundStyle(LColor.inkTertiary).frame(width: 22, alignment: .trailing)
+                    Text(w).font(LFont.body.monospaced()).foregroundStyle(LColor.ink)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, Space.sm).padding(.vertical, 8)
+                .background(LColor.surfaceAlt)
+                .clipShape(RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
+            }
+        }
     }
 }

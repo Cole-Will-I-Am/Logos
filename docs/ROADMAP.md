@@ -13,6 +13,30 @@ the **whole** program in view while we build it phase by phase. Status legend:
 > — 1:1 audio-only E2EE calls (WebRTC + signaling over the existing channel; gated
 > on push). A separate plane from messaging; comes after notifications + hardening.
 
+## ✅ Recently shipped (account & recovery) — 2026-06
+
+- **Persistent relay** — registrations + queued envelopes survive restarts (atomic
+  `snapshot.json`); the server signing key is reused so apps keep their pin.
+- **Honest "username taken"** — a registration 409 is surfaced as `UsernameTaken`,
+  not the misleading "can't reach the relay" (0.1.9).
+- **Identity recovery phrase** — identities are now seed-derived (HKDF over a 32-byte
+  master seed) → a **24-word BIP39** backup. `restore` re-derives the same keys and
+  reclaims the username on a new device (same key → contacts see no key-change).
+  Settings → *Back up your identity*; onboarding → *Restore from a recovery phrase*.
+  Recovers identity + username only — not message history or contacts.
+- **Reconnect after restore** — peer-side *Reset secure session* (Verify screen)
+  re-establishes a stale session when a contact restored/reinstalled with the SAME
+  identity (keeps verification). Logos deliberately won't auto-reset a live session
+  from an inbound handshake (replay-clobber defense); **automatic, replay-safe
+  re-establishment (epoch/root-key aware) is a tracked follow-up.**
+- **Multi-account** (multiple usernames per device) — design in
+  [`MULTI_ACCOUNT_PLAN.md`](MULTI_ACCOUNT_PLAN.md); not yet implemented.
+
+Next per the external review: **iOS at-rest store/history encryption** (pairs with
+the new master seed + Keychain), then the cheap batch (username grammar, CLI
+password, time-panic saturation, narrow the sealed-sender PQ claim), then **key
+transparency** (below).
+
 ## ▶︎ Resuming — immediate next steps (paused here)
 
 Picked up in this order when work resumes:

@@ -146,6 +146,36 @@ final class Session: ObservableObject {
         }
     }
 
+    /// Restore an existing identity on this device from its 24-word recovery phrase.
+    /// Re-derives the same keys and re-registers under `name` (reclaiming the
+    /// username). Recovers identity + username only — not history or contacts.
+    func restore(username name: String, phrase: String, relay: String) {
+        relayURL = relay
+        UserDefaults.standard.set(relay, forKey: "relayURL")
+        let path = storePath
+        let cleaned = phrase
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .lowercased()
+        Task {
+            do {
+                let c = try await runBlocking {
+                    try LogosClient.restore(path: path, serverUrl: relay, username: name,
+                                            recoveryPhrase: cleaned, password: nil)
+                }
+                client = c
+                username = c.username()
+                mailboxId = c.mailbox()
+                hardenStore()
+                startPolling()
+            } catch {
+                lastError = friendly(error)
+            }
+        }
+    }
+
     func startConversation(with peer: String) {
         if !conversations.contains(peer) { conversations.append(peer) }
         if messages[peer] == nil { messages[peer] = [] }
@@ -296,6 +326,25 @@ final class Session: ObservableObject {
         } catch { lastError = friendly(error) }
     }
 
+    /// Re-establish a chat after the other person restored from a recovery phrase
+    /// (or reinstalled with the SAME identity). Clears the stale local session so
+    /// their next message re-handshakes. The pin + verification are kept (the
+    /// identity key is unchanged), so this is not an identity reset.
+    func resetSession(_ peer: String) async {
+        guard let client else { return }
+        do {
+            try await runBlocking { try client.resetSession(peer: peer) }
+        } catch { lastError = friendly(error) }
+    }
+
+    /// This identity's 24-word recovery phrase, for the backup screen. `nil` if the
+    /// identity predates recovery support (legacy store) or no client is loaded.
+    func recoveryPhrase() async -> String? {
+        guard let client else { return nil }
+        do { return try await runBlocking { try client.exportRecoveryPhrase() } }
+        catch { lastError = friendly(error); return nil }
+    }
+
     // MARK: - Local chat history persistence
 
     /// On-disk snapshot of the UI-side chat history (the Rust store holds only the
@@ -375,6 +424,8 @@ final class Session: ObservableObject {
             return .network("@\(peer) isn’t on Logos yet — double-check the username.")
         case .UsernameTaken(let username):
             return .network("“\(username)” is already taken on this relay. Try a different username.")
+        case .InvalidRecoveryPhrase:
+            return .network("That recovery phrase isn’t valid — check the words and try again.")
         case .Network:
             return .network("Couldn’t reach the relay. We’ll keep this message ready to retry.")
         case .Client:

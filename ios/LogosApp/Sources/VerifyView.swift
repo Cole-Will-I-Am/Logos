@@ -32,6 +32,7 @@ struct VerifyView: View {
                 if changed && !verified { changeNotice }
                 safetyNumberCard
                 explanation
+                if info?.safetyNumber != nil { reconnectCard }
                 customizeCard
             }
             .padding(Space.lg)
@@ -194,6 +195,24 @@ struct VerifyView: View {
                 .font(LFont.footnote).foregroundStyle(LColor.goldText)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var reconnectCard: some View {
+        VStack(alignment: .leading, spacing: Space.sm) {
+            Label("Not receiving their messages?", systemImage: "arrow.triangle.2.circlepath")
+                .font(LFont.subhead.weight(.medium)).foregroundStyle(LColor.ink)
+            Text("If \(peer) restored their account from a recovery phrase (or reinstalled with the same identity), your secure session can go stale. Reset it to reconnect, then ask them to send a message. Your verification is kept.")
+                .font(LFont.footnote).foregroundStyle(LColor.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                Task { working = true; await session.resetSession(peer); await refresh(); working = false }
+            } label: {
+                Text("Reset secure session").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.logosSecondary)
+            .disabled(working)
+        }
+        .cardStyle()
     }
 
     private var customizeCard: some View {

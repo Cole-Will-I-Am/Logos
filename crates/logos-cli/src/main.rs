@@ -32,6 +32,13 @@ enum Command {
     Recv,
     /// Print this client's username.
     Whoami,
+    /// Print this identity's 24-word recovery phrase (back this up).
+    Phrase,
+    /// Restore an identity from its recovery phrase and re-register it.
+    Restore {
+        username: String,
+        phrase: Vec<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -60,6 +67,20 @@ fn main() -> anyhow::Result<()> {
         Command::Whoami => {
             let client = Client::load(&cli.store, &cli.server, Some("test-password"))?;
             println!("{}", client.username());
+        }
+        Command::Phrase => {
+            let client = Client::load(&cli.store, &cli.server, Some("test-password"))?;
+            println!("{}", client.export_recovery_phrase()?);
+        }
+        Command::Restore { username, phrase } => {
+            let client = Client::restore(
+                &cli.store,
+                &cli.server,
+                &username,
+                &phrase.join(" "),
+                Some("test-password"),
+            )?;
+            println!("restored '{}' (store: {})", client.username(), cli.store);
         }
     }
     Ok(())

@@ -29,6 +29,10 @@ pub enum LogosError {
     /// for a different name (the relay was reached; it refused the name).
     #[error("the username '{username}' is already taken")]
     UsernameTaken { username: String },
+    /// A recovery phrase failed to parse (wrong words / bad checksum) — restore
+    /// should ask the user to re-check the words.
+    #[error("that recovery phrase isn't valid — check the words and try again")]
+    InvalidRecoveryPhrase,
     /// Transport-level failure reaching the relay. Retryable.
     #[error("{msg}")]
     Network { msg: String },
@@ -44,6 +48,7 @@ impl From<logos_client::ClientError> for LogosError {
             C::IdentityChanged { peer } => LogosError::IdentityChanged { peer },
             C::NotRegistered { peer } => LogosError::NotRegistered { peer },
             C::UsernameTaken { username } => LogosError::UsernameTaken { username },
+            C::InvalidRecoveryPhrase => LogosError::InvalidRecoveryPhrase,
             C::Network(msg) => LogosError::Network { msg },
             C::Other(msg) => LogosError::Client { msg },
         }
@@ -110,6 +115,39 @@ impl LogosClient {
         }))
     }
 
+    /// Restore an identity from its 24-word recovery phrase onto a new device:
+    /// re-derives the same keys, re-registers under `username`, and persists to
+    /// `path`. Recovers the identity + username only — not history or contacts.
+    #[uniffi::constructor]
+    pub fn restore(
+        path: String,
+        server_url: String,
+        username: String,
+        recovery_phrase: String,
+        password: Option<String>,
+    ) -> Result<Arc<Self>, LogosError> {
+        let client = Client::restore(
+            &path,
+            &server_url,
+            &username,
+            &recovery_phrase,
+            password.as_deref(),
+        )?;
+        Ok(Arc::new(Self {
+            inner: Mutex::new(client),
+        }))
+    }
+
+    /// This identity's 24-word BIP39 recovery phrase (for the backup screen).
+    /// Errors if the identity predates recovery support (legacy store).
+    pub fn export_recovery_phrase(&self) -> Result<String, LogosError> {
+        Ok(self
+            .inner
+            .lock()
+            .expect("client lock")
+            .export_recovery_phrase()?)
+    }
+
     /// This client's username.
     pub fn username(&self) -> String {
         self.inner
@@ -171,6 +209,17 @@ impl LogosClient {
             .lock()
             .expect("client lock")
             .reset_peer_identity(&peer)?;
+        Ok(())
+    }
+
+    /// Re-establish a stale session after `peer` restored from a recovery phrase
+    /// (same identity). Clears only the local session so their next handshake is
+    /// accepted; the pin/verification are kept.
+    pub fn reset_session(&self, peer: String) -> Result<(), LogosError> {
+        self.inner
+            .lock()
+            .expect("client lock")
+            .reset_session(&peer)?;
         Ok(())
     }
 }

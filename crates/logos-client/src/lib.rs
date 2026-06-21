@@ -60,6 +60,10 @@ pub enum ClientError {
     /// "can't reach the relay" (the relay was reached — it refused the name).
     #[error("the username '{username}' is already taken on this relay")]
     UsernameTaken { username: String },
+    /// A recovery phrase failed to parse (wrong word count, misspelling, or a bad
+    /// BIP39 checksum). Surfaced distinctly so restore can say "check the words".
+    #[error("that recovery phrase isn't valid — check the words and try again")]
+    InvalidRecoveryPhrase,
     /// Transport-level failure reaching the relay. Retryable.
     #[error("network error: {0}")]
     Network(String),
@@ -165,6 +169,12 @@ struct Session {
 struct Store {
     username: String,
     identity_secret: Vec<u8>,
+    /// 32-byte master seed the identity was derived from (HKDF → Ed25519 + X25519).
+    /// Encoded as the BIP39 recovery phrase. `None` for legacy identities created
+    /// before recovery phrases existed (they predate seed-derivation and cannot
+    /// produce a phrase). `#[serde(default)]` so those stores keep deserializing.
+    #[serde(default)]
+    identity_seed: Option<[u8; 32]>,
     signed_prekey_id: u32,
     signed_prekey_secret: [u8; 32],
     kem_one_time: Vec<KemSecretRec>,
@@ -189,6 +199,9 @@ impl Drop for Store {
         // (username, ids, pinned identities, certificates) is intentionally
         // skipped — it carries no key material.
         self.identity_secret.zeroize();
+        if let Some(seed) = self.identity_seed.as_mut() {
+            seed.zeroize();
+        }
         self.signed_prekey_secret.zeroize();
         for rec in &mut self.kem_one_time {
             rec.zeroize();
@@ -227,20 +240,106 @@ pub struct Client {
     password: Option<String>,
 }
 
+/// BIP39 encoding of the 32-byte identity master seed as a 24-word recovery phrase.
+mod recovery {
+    use super::ClientError;
+    use bip39::Mnemonic;
+
+    /// Encode a 32-byte seed as a 24-word English BIP39 phrase.
+    pub fn seed_to_phrase(seed: &[u8; 32]) -> String {
+        Mnemonic::from_entropy(seed)
+            .expect("32 bytes is valid BIP39 entropy")
+            .to_string()
+    }
+
+    /// Decode a recovery phrase back to its 32-byte seed, validating the BIP39
+    /// checksum (catches typos/missing words) and the expected length.
+    pub fn phrase_to_seed(phrase: &str) -> Result<[u8; 32], ClientError> {
+        let mnemonic =
+            Mnemonic::parse_normalized(phrase).map_err(|_| ClientError::InvalidRecoveryPhrase)?;
+        let entropy = mnemonic.to_entropy();
+        if entropy.len() != 32 {
+            return Err(ClientError::InvalidRecoveryPhrase);
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&entropy);
+        Ok(seed)
+    }
+}
+
 impl Client {
     /// Create a new identity, register it with the relay, and persist to `path`.
-    /// Create a new identity, register it with the relay, and persist to `path`.
     ///
-    /// `password` is stretched with Argon2id to encrypt the store at rest. A
-    /// `None` password is accepted for tests/dev but must not be used for real
-    /// accounts.
+    /// The identity is derived from a fresh 32-byte master seed, so it can be
+    /// backed up as a 24-word BIP39 recovery phrase (see `export_recovery_phrase`)
+    /// and later restored on a new device with `restore`. `password` is stretched
+    /// with Argon2id to encrypt the store at rest; `None` is accepted for tests/dev
+    /// but must not be used for real accounts.
     pub fn create(
         path: impl AsRef<Path>,
         server_url: &str,
         username: &str,
         password: Option<&str>,
     ) -> Result<Self> {
-        let identity = IdentityKeyPair::generate();
+        let (identity, seed) = IdentityKeyPair::generate_seeded();
+        Self::register_identity(
+            path.as_ref(),
+            server_url,
+            username,
+            password,
+            identity,
+            Some(seed),
+        )
+    }
+
+    /// Restore an identity from its 24-word BIP39 `recovery_phrase` and re-register
+    /// it on `server_url` under `username`. The same seed reproduces the same keys,
+    /// so the relay accepts the re-registration (idempotent for a matching identity)
+    /// and contacts who pinned this identity see no key-change warning.
+    ///
+    /// Recovers the IDENTITY + username only — NOT message history, the contact
+    /// list, or device-local verification state (those never leave the device).
+    pub fn restore(
+        path: impl AsRef<Path>,
+        server_url: &str,
+        username: &str,
+        recovery_phrase: &str,
+        password: Option<&str>,
+    ) -> Result<Self> {
+        let seed = recovery::phrase_to_seed(recovery_phrase)?;
+        let identity = IdentityKeyPair::from_seed(&seed);
+        Self::register_identity(
+            path.as_ref(),
+            server_url,
+            username,
+            password,
+            identity,
+            Some(seed),
+        )
+    }
+
+    /// The 24-word BIP39 recovery phrase for this identity, or an error if this
+    /// identity predates seed-derivation (legacy stores carry no master seed).
+    pub fn export_recovery_phrase(&self) -> Result<String> {
+        match &self.store.identity_seed {
+            Some(seed) => Ok(recovery::seed_to_phrase(seed)),
+            None => Err(ClientError::other(
+                "this identity has no recovery phrase (it predates backup support); create a new identity to get one",
+            )),
+        }
+    }
+
+    /// Shared registration path for `create`/`restore`: mint fresh prekeys, register
+    /// `identity` under `username`, fetch the server key + sealed-sender cert, and
+    /// persist. `seed` is the identity's master seed (kept for the recovery phrase).
+    fn register_identity(
+        path: &Path,
+        server_url: &str,
+        username: &str,
+        password: Option<&str>,
+        identity: IdentityKeyPair,
+        seed: Option<[u8; 32]>,
+    ) -> Result<Self> {
         let (spk_pub, spk_sec) = new_signed_prekey(1, &identity);
         let mut otk_pub = Vec::new();
         let mut otk_sec = Vec::new();
@@ -307,6 +406,7 @@ impl Client {
         let store = Store {
             username: username.to_string(),
             identity_secret: identity.to_secret_bytes().to_vec(),
+            identity_seed: seed,
             signed_prekey_id: 1,
             signed_prekey_secret: spk_sec.secret.to_bytes(),
             kem_one_time,
@@ -320,7 +420,7 @@ impl Client {
         };
         let mut me = Self {
             store,
-            path: path.as_ref().to_path_buf(),
+            path: path.to_path_buf(),
             server_url: server_url.to_string(),
             http,
             password: password.map(|p| p.to_string()),
@@ -754,6 +854,17 @@ impl Client {
         self.save()
     }
 
+    /// Re-establish a stale session after a contact restored their identity from a
+    /// recovery phrase (or reinstalled with the SAME identity). Drops ONLY the local
+    /// session — the TOFU pin and verification are kept, because the identity key is
+    /// unchanged. This lets the contact's next handshake be accepted instead of
+    /// dropped as a replay against the existing session (see `process_envelope`).
+    /// The contact must send again afterward to complete the re-handshake.
+    pub fn reset_session(&mut self, peer: &str) -> Result<()> {
+        self.store.sessions.remove(peer);
+        self.save()
+    }
+
     fn establish_and_decrypt(
         &mut self,
         cert: &SenderCertificate,
@@ -837,5 +948,31 @@ impl Client {
             },
         );
         Ok(String::from_utf8_lossy(&pt).into_owned())
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::{recovery, ClientError};
+
+    #[test]
+    fn phrase_roundtrip_is_24_words_and_recovers_the_seed() {
+        let seed = [7u8; 32];
+        let phrase = recovery::seed_to_phrase(&seed);
+        assert_eq!(phrase.split_whitespace().count(), 24);
+        assert_eq!(recovery::phrase_to_seed(&phrase).unwrap(), seed);
+    }
+
+    #[test]
+    fn invalid_phrase_is_rejected() {
+        // Not real wordlist words.
+        assert!(matches!(
+            recovery::phrase_to_seed("not a valid recovery phrase at all please"),
+            Err(ClientError::InvalidRecoveryPhrase)
+        ));
+        // Valid words but a wrong checksum (canonical all-zero entropy ends in
+        // "art", so "abandon" x24 must fail the checksum).
+        let phrase = "abandon ".repeat(24);
+        assert!(recovery::phrase_to_seed(phrase.trim()).is_err());
     }
 }

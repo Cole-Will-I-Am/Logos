@@ -10,11 +10,13 @@
 //! EXPERIMENTAL — UNAUDITED. Do not use for real secrets. See repository README.
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use hkdf::Hkdf;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use x25519_dalek::{PublicKey as X25519Public, StaticSecret as X25519Secret};
-use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub mod kem;
 pub use kem::{KemCiphertext, KemPublic, KemSecret, KemSharedSecret};
@@ -115,6 +117,40 @@ impl IdentityKeyPair {
             dh_public,
             dh_secret,
         }
+    }
+
+    /// Derive a complete identity (Ed25519 signing + X25519 DH) deterministically
+    /// from a 32-byte master `seed` via HKDF-SHA256 with per-key domain separation.
+    /// The recovery phrase encodes this seed, so restoring it reproduces the exact
+    /// same identity keys — hence the same username binding and safety number.
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        let hk = Hkdf::<Sha256>::new(None, seed);
+        let mut ed = [0u8; 32];
+        hk.expand(b"logos-identity-ed25519-v1", &mut ed)
+            .expect("hkdf expand of 32 bytes is infallible");
+        let mut dh = [0u8; 32];
+        hk.expand(b"logos-identity-x25519-v1", &mut dh)
+            .expect("hkdf expand of 32 bytes is infallible");
+        let signing = SigningKey::from_bytes(&ed);
+        let dh_secret = X25519Secret::from(dh);
+        let dh_public = X25519Public::from(&dh_secret);
+        ed.zeroize();
+        dh.zeroize();
+        Self {
+            signing,
+            dh_public,
+            dh_secret,
+        }
+    }
+
+    /// Generate a fresh identity from OS entropy, returning the keypair together
+    /// with its 32-byte master seed so the caller can persist it for the recovery
+    /// phrase. Prefer this over `generate()` for real accounts.
+    pub fn generate_seeded() -> (Self, [u8; 32]) {
+        let mut seed = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut seed);
+        let kp = Self::from_seed(&seed);
+        (kp, seed)
     }
 }
 
@@ -325,6 +361,21 @@ mod tests {
         let bytes = id.to_secret_bytes();
         let restored = IdentityKeyPair::from_secret_bytes(&bytes);
         assert_eq!(id.public(), restored.public());
+    }
+
+    #[test]
+    fn seed_derivation_is_deterministic_and_recovers_the_same_identity() {
+        let (id, seed) = IdentityKeyPair::generate_seeded();
+        // Re-deriving from the same seed reproduces the exact public identity
+        // (both Ed25519 and X25519 legs) — the basis of recovery-phrase restore.
+        let again = IdentityKeyPair::from_seed(&seed);
+        assert_eq!(id.public(), again.public());
+        // A signature from the re-derived key verifies under the original public.
+        let msg = b"recovered";
+        assert!(verify(&again.public(), msg, &id.sign(msg)).is_ok());
+        // Different seeds → different identities.
+        let other = IdentityKeyPair::from_seed(&[0u8; 32]);
+        assert_ne!(id.public(), other.public());
     }
 
     #[test]
