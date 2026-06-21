@@ -1,4 +1,5 @@
 import SwiftUI
+import LogosKit
 
 /// Identity verification — real safety numbers from the Rust core.
 /// Compare the number out-of-band, mark verified, and recover from a legitimate
