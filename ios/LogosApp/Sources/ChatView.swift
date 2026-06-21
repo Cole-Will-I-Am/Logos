@@ -178,6 +178,7 @@ struct ChatView: View {
 
                 TextField("Message", text: $draft, axis: .vertical)
                     .focused($composerFocused)
+                    .onChange(of: draft) { _ in collapseDoubledAts() }
                     .lineLimit(1...6)
                     .font(LFont.body)
                     .padding(.horizontal, Space.sm).padding(.vertical, 9)
@@ -263,8 +264,19 @@ struct ChatView: View {
 
     private func insertMention() {
         guard let at = draft.lastIndex(of: "@") else { return }
-        draft = String(draft[..<at]) + "@\(aiName) "
+        var head = String(draft[..<at])
+        while head.last == "@" { head.removeLast() }   // never produce "@@"
+        draft = head + "@\(aiName) "
         Haptic.tap()
+    }
+
+    /// Collapse an accidental run of "@@" (the autocomplete chip landing on top of a
+    /// typed "@") down to a single "@", live as the user types.
+    private func collapseDoubledAts() {
+        guard draft.contains("@@") else { return }
+        var s = draft
+        while s.contains("@@") { s = s.replacingOccurrences(of: "@@", with: "@") }
+        draft = s
     }
 
     /// If the just-sent message tags the assistant, generate an answer for the thread
