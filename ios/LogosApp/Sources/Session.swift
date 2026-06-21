@@ -110,6 +110,23 @@ final class Session: ObservableObject {
         loadIfExists()
     }
 
+    /// Abandon the current on-device identity and return to onboarding to create a
+    /// fresh one (on the same relay). Deletes the local store, history, and avatars
+    /// for the active relay. Destructive and irreversible unless the user saved a
+    /// recovery phrase first — the UI must confirm before calling this.
+    func startNewIdentity() {
+        pollTask?.cancel(); pollTask = nil
+        client = nil
+        try? FileManager.default.removeItem(atPath: storePath)
+        try? FileManager.default.removeItem(atPath: historyPath)
+        try? FileManager.default.removeItem(at: avatarDir)
+        username = nil; mailboxId = ""
+        conversations = []; messages = [:]; security = [:]; lastError = nil
+        online = true; lastSynced = nil; syncing = false
+        pinned = []; archived = []; unread = [:]; nicknames = [:]; avatars = [:]
+        activePeer = nil
+    }
+
     func security(for peer: String) -> SessionSecurity { security[peer] ?? .encrypted }
 
     private func loadIfExists() {

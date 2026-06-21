@@ -8,6 +8,7 @@ struct SettingsView: View {
     @State private var privateURL = ""
     @State private var showMyQR = false
     @State private var showPhrase = false
+    @State private var showNewIdentityConfirm = false
 
     var body: some View {
         ScrollView {
@@ -26,6 +27,12 @@ struct SettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showMyQR) { myQRSheet }
         .sheet(isPresented: $showPhrase) { RecoveryPhraseSheet().environmentObject(session) }
+        .alert("Start a new identity?", isPresented: $showNewIdentityConfirm) {
+            Button("Delete & start new", role: .destructive) { session.startNewIdentity() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This deletes your current identity and chats on this device and returns you to sign-up, where you can choose a new username. You can’t undo this unless you’ve saved your recovery phrase.")
+        }
         .onAppear {
             relayMode = session.relayURL == Session.defaultRelay ? 0 : 1
             privateURL = relayMode == 1 ? session.relayURL : ""
@@ -150,6 +157,13 @@ struct SettingsView: View {
                         Text("Back up your identity")
                     }
                     .font(LFont.footnote.weight(.medium)).foregroundStyle(LColor.goldText)
+                }
+                Button { showNewIdentityConfirm = true } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.crop.circle.badge.plus")
+                        Text("Start a new identity")
+                    }
+                    .font(LFont.footnote.weight(.medium)).foregroundStyle(LColor.danger)
                 }
             }
         }
