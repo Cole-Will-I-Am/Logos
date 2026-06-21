@@ -38,11 +38,15 @@ fn tmp(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("logos-poc-{}-{}", std::process::id(), name))
 }
 
-/// Rebuild an identity from a *plaintext* client store (demonstrates the store
-/// exposes the long-term secret in the clear, and lets us act as that mailbox's
-/// owner to capture envelopes the way a malicious relay can see them).
+/// Rebuild an identity from the **Argon2id-encrypted** client store. In these
+/// tests we know the test password, so we can still act as a malicious local
+/// attacker who extracted it; in production the password is not on disk.
 fn identity_from_store(path: &std::path::Path) -> IdentityKeyPair {
-    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let file_bytes = std::fs::read(path).unwrap();
+    let plaintext =
+        logos_client::encrypted_store::decrypt_store(Some("test-password"), &file_bytes)
+            .expect("decrypt test store");
+    let v: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
     let arr = v["identity_secret"].as_array().unwrap();
     let bytes: Vec<u8> = arr.iter().map(|x| x.as_u64().unwrap() as u8).collect();
     let fixed: [u8; 64] = bytes.try_into().unwrap();
@@ -126,7 +130,7 @@ fn raw_directory(url: &str, who: &str) -> DirectoryResponse {
 #[test]
 fn poc_v3_unauthenticated_directory_drains_one_time_prekeys() {
     let url = start_relay();
-    let _bob = Client::create(tmp("v3-bob"), &url, "v3bob").unwrap();
+    let _bob = Client::create(tmp("v3-bob"), &url, "v3bob", Some("test-password")).unwrap();
 
     // 20 one-time X25519 + 10 one-time ML-KEM prekeys were registered.
     // Drain them with plain GETs — no auth, no message ever sent.
@@ -152,8 +156,9 @@ fn poc_v3_unauthenticated_directory_drains_one_time_prekeys() {
 fn poc_v1_redelivered_normal_message_is_stuck_forever() {
     let url = start_relay();
     let bob_path = tmp("v1-bob");
-    let mut alice = Client::create(tmp("v1-alice"), &url, "v1alice").unwrap();
-    let mut bob = Client::create(&bob_path, &url, "v1bob").unwrap();
+    let mut alice =
+        Client::create(tmp("v1-alice"), &url, "v1alice", Some("test-password")).unwrap();
+    let mut bob = Client::create(&bob_path, &url, "v1bob", Some("test-password")).unwrap();
     let bob_id = identity_from_store(&bob_path);
     let bob_pub = bob_id.public();
 
@@ -188,8 +193,9 @@ fn poc_v1_redelivered_normal_message_is_stuck_forever() {
 fn poc_v2_prekey_replay_resets_established_session() {
     let url = start_relay();
     let bob_path = tmp("v2-bob");
-    let mut alice = Client::create(tmp("v2-alice"), &url, "v2alice").unwrap();
-    let mut bob = Client::create(&bob_path, &url, "v2bob").unwrap();
+    let mut alice =
+        Client::create(tmp("v2-alice"), &url, "v2alice", Some("test-password")).unwrap();
+    let mut bob = Client::create(&bob_path, &url, "v2bob", Some("test-password")).unwrap();
     let bob_id = identity_from_store(&bob_path);
     let bob_pub = bob_id.public();
 
@@ -233,31 +239,38 @@ fn poc_v2_prekey_replay_resets_established_session() {
 fn poc_v6_corrupt_store_panics_on_use_not_load() {
     let url = start_relay();
     let path = tmp("v6-store");
-    let _ = Client::create(&path, &url, "v6user").unwrap();
+    let _ = Client::create(&path, &url, "v6user", Some("test-password")).unwrap();
 
-    // Corrupt identity_secret to the wrong length (simulates disk corruption /
-    // tampering) but keep valid JSON.
-    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    // Corrupt the inner Store JSON inside the encrypted envelope: set
+    // identity_secret to the wrong length (simulates tampering after decrypt).
+    let file_bytes = std::fs::read(&path).unwrap();
+    let mut v: serde_json::Value = serde_json::from_slice(
+        &logos_client::encrypted_store::decrypt_store(Some("test-password"), &file_bytes).unwrap(),
+    )
+    .unwrap();
     v["identity_secret"] = serde_json::json!([1, 2, 3]); // 3 bytes, not 64
-    std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    let tampered = logos_client::encrypted_store::encrypt_store(
+        Some("test-password"),
+        &serde_json::to_vec(&v).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(&path, tampered).unwrap();
 
     // A corrupt store must surface a recoverable error (not panic on load or use).
-    let loaded =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Client::load(&path, &url)));
+    let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Client::load(&path, &url, Some("test-password"))
+    }));
     match loaded {
         Ok(Err(_)) => { /* recoverable error — correct */ }
         Ok(Ok(_)) => panic!("corrupt store loaded successfully (should be rejected)"),
         Err(_) => panic!("BUG: corrupt store caused a panic instead of a recoverable error"),
     }
 }
-
-/// V8: unsealable garbage posted to a mailbox (sealed-sender posting is open) must
-/// be drained (ACK-dropped), not left to accumulate and be re-fetched every poll.
 #[test]
 fn poc_v8_garbage_envelopes_are_drained_not_stuck() {
     let url = start_relay();
     let bob_path = tmp("v8-bob");
-    let mut bob = Client::create(&bob_path, &url, "v8bob").unwrap();
+    let mut bob = Client::create(&bob_path, &url, "v8bob", Some("test-password")).unwrap();
     let bob_pub = identity_from_store(&bob_path).public();
     let bob_id = identity_from_store(&bob_path);
 
@@ -287,8 +300,9 @@ fn poc_v8_garbage_envelopes_are_drained_not_stuck() {
 fn poc_vcrit_mailbox_not_readable_or_drainable_with_foreign_ed() {
     let url = start_relay();
     let bob_path = tmp("vc-bob");
-    let mut alice = Client::create(tmp("vc-alice"), &url, "vcalice").unwrap();
-    let mut bob = Client::create(&bob_path, &url, "vcbob").unwrap();
+    let mut alice =
+        Client::create(tmp("vc-alice"), &url, "vcalice", Some("test-password")).unwrap();
+    let mut bob = Client::create(&bob_path, &url, "vcbob", Some("test-password")).unwrap();
     let victim = identity_from_store(&bob_path).public();
 
     alice.send("vcbob", "top secret").unwrap();

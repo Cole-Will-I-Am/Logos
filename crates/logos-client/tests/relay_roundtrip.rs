@@ -35,8 +35,8 @@ fn tmp(name: &str) -> std::path::PathBuf {
 fn two_clients_exchange_messages_through_relay() {
     let url = start_relay();
 
-    let mut alice = Client::create(tmp("alice"), &url, "alice").unwrap();
-    let mut bob = Client::create(tmp("bob"), &url, "bob").unwrap();
+    let mut alice = Client::create(tmp("alice"), &url, "alice", Some("test-password")).unwrap();
+    let mut bob = Client::create(tmp("bob"), &url, "bob", Some("test-password")).unwrap();
 
     // Alice -> Bob (first message establishes the session via PQXDH prekey message).
     alice.send("bob", "hello bob").unwrap();
@@ -62,7 +62,7 @@ fn two_clients_exchange_messages_through_relay() {
     assert!(bob.recv().unwrap().is_empty());
 
     // Persistence: reload Bob from disk and keep decrypting on the same session.
-    let mut bob2 = Client::load(tmp("bob"), &url).unwrap();
+    let mut bob2 = Client::load(tmp("bob"), &url, Some("test-password")).unwrap();
     alice.send("bob", "after reload").unwrap();
     let got = bob2.recv().unwrap();
     assert_eq!(got[0].text, "after reload");
@@ -71,9 +71,9 @@ fn two_clients_exchange_messages_through_relay() {
 #[test]
 fn other_identity_cannot_read_or_drain_mailbox() {
     let url = start_relay();
-    let mut alice = Client::create(tmp("a2"), &url, "alice2").unwrap();
-    let mut bob = Client::create(tmp("b2"), &url, "bob2").unwrap();
-    let mut eve = Client::create(tmp("e2"), &url, "eve2").unwrap();
+    let mut alice = Client::create(tmp("a2"), &url, "alice2", Some("test-password")).unwrap();
+    let mut bob = Client::create(tmp("b2"), &url, "bob2", Some("test-password")).unwrap();
+    let mut eve = Client::create(tmp("e2"), &url, "eve2", Some("test-password")).unwrap();
 
     alice.send("bob2", "for bob only").unwrap();
 

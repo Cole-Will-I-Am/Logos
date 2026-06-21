@@ -9,6 +9,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[doc(hidden)]
+pub mod encrypted_store;
+
 use logos_identity::{
     new_kem_prekey, new_one_time_prekey, new_signed_prekey, IdentityKeyPair, IdentityPublic,
     KemSecret,
@@ -214,11 +217,24 @@ pub struct Client {
     path: PathBuf,
     server_url: String,
     http: reqwest::blocking::Client,
+    /// Store encryption password (Argon2id). `None` is allowed only for
+    /// tests/dev.
+    password: Option<String>,
 }
 
 impl Client {
     /// Create a new identity, register it with the relay, and persist to `path`.
-    pub fn create(path: impl AsRef<Path>, server_url: &str, username: &str) -> Result<Self> {
+    /// Create a new identity, register it with the relay, and persist to `path`.
+    ///
+    /// `password` is stretched with Argon2id to encrypt the store at rest. A
+    /// `None` password is accepted for tests/dev but must not be used for real
+    /// accounts.
+    pub fn create(
+        path: impl AsRef<Path>,
+        server_url: &str,
+        username: &str,
+        password: Option<&str>,
+    ) -> Result<Self> {
         let identity = IdentityKeyPair::generate();
         let (spk_pub, spk_sec) = new_signed_prekey(1, &identity);
         let mut otk_pub = Vec::new();
@@ -294,6 +310,7 @@ impl Client {
             path: path.as_ref().to_path_buf(),
             server_url: server_url.to_string(),
             http,
+            password: password.map(|p| p.to_string()),
         };
         // F-06: acquire the sealed-sender certificate at registration time, so its
         // issuance isn't correlated by the relay with a later send.
@@ -308,9 +325,15 @@ impl Client {
     /// 64-byte identity secret) so a corrupt/tampered store surfaces a recoverable
     /// error here rather than panicking on first use (which, across the iOS FFI
     /// boundary, would crash the app).
-    pub fn load(path: impl AsRef<Path>, server_url: &str) -> Result<Self> {
-        let bytes = std::fs::read(path.as_ref()).map_err(err)?;
-        let store: Store = serde_json::from_slice(&bytes).map_err(err)?;
+    /// Load an existing client from `path`.
+    ///
+    /// Decrypts the Argon2id-wrapped store with `password`. Use the same
+    /// password that was passed to `create`.
+    pub fn load(path: impl AsRef<Path>, server_url: &str, password: Option<&str>) -> Result<Self> {
+        let file_bytes = std::fs::read(path.as_ref()).map_err(err)?;
+        let plaintext = encrypted_store::decrypt_store(password, &file_bytes)
+            .map_err(|e| ClientError::other(format!("store decryption failed: {e}")))?;
+        let store: Store = serde_json::from_slice(&plaintext).map_err(err)?;
         if store.identity_secret.len() != 64 {
             return Err(ClientError::other(format!(
                 "corrupt store: identity_secret is {} bytes (expected 64)",
@@ -322,6 +345,7 @@ impl Client {
             path: path.as_ref().to_path_buf(),
             server_url: server_url.to_string(),
             http: http_client(),
+            password: password.map(|p| p.to_string()),
         })
     }
 
@@ -353,9 +377,11 @@ impl Client {
     /// corrupt the entire store (identity + sessions + prekeys); rename on the
     /// same directory is atomic and leaves the old store intact on failure.
     fn save(&self) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(&self.store).map_err(err)?;
+        let plaintext = serde_json::to_vec_pretty(&self.store).map_err(err)?;
+        let file_bytes = encrypted_store::encrypt_store(self.password.as_deref(), &plaintext)
+            .map_err(|e| ClientError::other(format!("store encryption failed: {e}")))?;
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, bytes).map_err(err)?;
+        std::fs::write(&tmp, file_bytes).map_err(err)?;
         std::fs::rename(&tmp, &self.path).map_err(err)
     }
 

@@ -74,22 +74,32 @@ pub struct LogosClient {
 #[uniffi::export]
 impl LogosClient {
     /// Create a new identity, register it with the relay, and persist to `path`.
+    ///
+    /// `password` is stretched with Argon2id and used to encrypt the store at
+    /// rest. Pass `None` only in test/dev settings.
     #[uniffi::constructor]
     pub fn create(
         path: String,
         server_url: String,
         username: String,
+        password: Option<String>,
     ) -> Result<Arc<Self>, LogosError> {
-        let client = Client::create(&path, &server_url, &username)?;
+        let client = Client::create(&path, &server_url, &username, password.as_deref())?;
         Ok(Arc::new(Self {
             inner: Mutex::new(client),
         }))
     }
 
     /// Load an existing client store from `path`.
+    ///
+    /// Decrypts the Argon2id-wrapped store with `password`.
     #[uniffi::constructor]
-    pub fn load(path: String, server_url: String) -> Result<Arc<Self>, LogosError> {
-        let client = Client::load(&path, &server_url)?;
+    pub fn load(
+        path: String,
+        server_url: String,
+        password: Option<String>,
+    ) -> Result<Arc<Self>, LogosError> {
+        let client = Client::load(&path, &server_url, password.as_deref())?;
         Ok(Arc::new(Self {
             inner: Mutex::new(client),
         }))
