@@ -65,11 +65,8 @@ struct ConversationsView: View {
     @ViewBuilder private var content: some View {
         if session.conversations.isEmpty {
             LEmptyState(
-                icon: "bubble.left.and.text.bubble.right",
                 title: "No conversations yet",
-                message: "Start one with a username — your messages are end-to-end encrypted from the very first hello.",
-                actionTitle: "New chat",
-                action: { showCompose = true }
+                message: "Start one with a username — your messages are end-to-end encrypted from the very first hello."
             )
         } else {
             ScrollView {

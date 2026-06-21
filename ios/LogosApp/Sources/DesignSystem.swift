@@ -375,7 +375,7 @@ struct OfflineBanner: View {
 // MARK: - Empty state
 
 struct LEmptyState: View {
-    let icon: String
+    var icon: String? = nil
     let title: String
     let message: String
     var actionTitle: String? = nil
@@ -383,11 +383,13 @@ struct LEmptyState: View {
 
     var body: some View {
         VStack(spacing: Space.md) {
-            Image(systemName: icon)
-                .font(.system(size: 40, weight: .light))
-                .foregroundStyle(LColor.goldText)
-                .frame(width: 84, height: 84)
-                .background(LColor.goldWash, in: Circle())
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 40, weight: .light))
+                    .foregroundStyle(LColor.goldText)
+                    .frame(width: 84, height: 84)
+                    .background(LColor.goldWash, in: Circle())
+            }
             VStack(spacing: Space.xs) {
                 Text(title).font(LFont.title3).foregroundStyle(LColor.ink)
                 Text(message)
