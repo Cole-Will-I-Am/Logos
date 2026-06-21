@@ -131,7 +131,7 @@ with `cargo test --workspace`; the iOS build is `gh workflow run build` (while p
 | **P1.5 — Security-review hardening** | transactional decrypt, cert↔identity binding + TOFU, one-time ML-KEM, domain-separated sigs, panic removal, persisted server key | ✅ |
 | **P2 — iOS app** | `logos-ffi` (UniFFI) ✅ → `LogosKit.xcframework` + SwiftUI app (source ✅, CI build validating) → deploy relay (localhost ✅, public TLS pending) → TestFlight (needs signing) | 🚧 |
 | **P3 — Key transparency** | append-only verifiable log of identity keys + client auditing/gossip (the real fix for relay-as-cert-authority; upgrades TOFU) | ⏳ |
-| **P4 — Groups (MLS)** | `openmls` group messaging | ⏳ |
+| **P4 — Groups (E2EE)** | sender-key small groups (v1) → `openmls`/MLS (P4.1) — design in [`GROUP_CHAT_PLAN.md`](GROUP_CHAT_PLAN.md). E2EE, NOT Telegram-style server-readable | ⏳ |
 | **P5 — Advanced privacy** | onion/mixnet transport, blinded/rotating mailbox ids, PSI contact discovery, multi-device | ⏳ |
 | **Cross-cutting hardening** | redb relay persistence + TTL, Argon2id client-store encryption, prekey-fetch rate limits, full zeroization, reproducible-build/binary-transparency CI | ⏳ |
 | **External security audit** | protocol + implementation + infra | 🔒 gate before any real-world use |
