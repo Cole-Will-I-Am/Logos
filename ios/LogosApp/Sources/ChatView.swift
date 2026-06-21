@@ -5,6 +5,7 @@ struct ChatView: View {
     let peer: String
     @State private var draft = ""
     @State private var acknowledgedChange = false
+    @State private var showCatchup = false
     @FocusState private var composerFocused: Bool
 
     private var msgs: [ChatMessage] { session.messages[peer] ?? [] }
@@ -35,12 +36,19 @@ struct ChatView: View {
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
+                Button { Haptic.tap(); showCatchup = true } label: {
+                    Image(systemName: "sparkles").foregroundStyle(LColor.goldText)
+                }
+                .accessibilityLabel("Catch me up")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 NavigationLink { VerifyView(peer: peer) } label: {
                     Image(systemName: "info.circle").foregroundStyle(LColor.goldText)
                 }
                 .accessibilityLabel("Conversation details")
             }
         }
+        .sheet(isPresented: $showCatchup) { AICatchUpSheet(peer: peer).environmentObject(session) }
     }
 
     // Tiny, quiet status under the title. Loud only when something is wrong.

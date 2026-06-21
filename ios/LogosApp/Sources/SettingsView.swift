@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var showMyQR = false
     @State private var showPhrase = false
     @State private var showNewIdentityConfirm = false
+    @State private var showAI = false
 
     var body: some View {
         ScrollView {
@@ -16,6 +17,7 @@ struct SettingsView: View {
                 brandHeader
                 identityCard
                 networkSection
+                aiSection
                 privacySection
                 aboutSection
             }
@@ -27,6 +29,7 @@ struct SettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showMyQR) { myQRSheet }
         .sheet(isPresented: $showPhrase) { RecoveryPhraseSheet().environmentObject(session) }
+        .sheet(isPresented: $showAI) { AISettingsView() }
         .alert("Start a new identity?", isPresented: $showNewIdentityConfirm) {
             Button("Delete & start new", role: .destructive) { Task { await session.startNewIdentity() } }
             Button("Cancel", role: .cancel) {}
@@ -192,6 +195,29 @@ struct SettingsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showMyQR = false } } }
         }
+    }
+
+    private var aiSection: some View {
+        Button { Haptic.tap(); showAI = true } label: {
+            HStack(spacing: Space.sm) {
+                Image(systemName: "sparkles").font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(LColor.goldText).frame(width: 26)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("AI (bring your own key)").font(LFont.body).foregroundStyle(LColor.ink)
+                    Text(AIConfig.configured
+                         ? "\(AIConfig.provider.label) · keys stay on this device"
+                         : "Off — add your own Anthropic / OpenAI / Ollama key")
+                        .font(LFont.footnote).foregroundStyle(LColor.inkSecondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(LColor.inkTertiary)
+            }
+            .padding(Space.md)
+        }
+        .buttonStyle(.plain)
+        .cardStyle(padding: 0)
     }
 
     private var privacySection: some View {
