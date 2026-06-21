@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 zeroize.workspace = true
+rand.workspace = true
 argon2.workspace = true
 bip39.workspace = true
 sha2.workspace = true
@@ -23,5 +24,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 logos-server.workspace = true
+logos-proto.workspace = true
+reqwest.workspace = true
 tokio.workspace = true
 axum.workspace = true

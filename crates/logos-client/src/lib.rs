@@ -5,7 +5,7 @@
 //!
 //! EXPERIMENTAL — UNAUDITED.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,16 +13,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub mod encrypted_store;
 
 use logos_identity::{
-    new_kem_prekey, new_one_time_prekey, new_signed_prekey, IdentityKeyPair, IdentityPublic,
-    KemSecret,
+    new_kem_prekey, new_one_time_prekey, new_signed_prekey, verify_ed25519, GroupSigningKey,
+    IdentityKeyPair, IdentityPublic, KemSecret,
 };
 use logos_pqxdh::{initiate, respond, InitialMessage};
 use logos_proto::{
-    ack_signed_bytes, cert_signed_bytes, fetch_signed_bytes, mailbox_id, registration_signed_bytes,
+    ack_signed_bytes, cert_signed_bytes, fetch_signed_bytes, group_id_hex,
+    group_message_signed_bytes, mailbox_id, registration_signed_bytes, replenish_signed_bytes,
     validate_username, AckRequest, CertRequest, CertResponse, DirectoryResponse, FetchRequest,
-    FetchResponse, OuterMessage, PostEnvelope, RegisterRequest, ServerKeyResponse,
+    FetchResponse, GroupControl, GroupMeta, OuterMessage, PostEnvelope, RegisterRequest,
+    ReplenishRequest, SenderKeyDist, ServerKeyResponse,
 };
-use logos_ratchet::RatchetState;
+use logos_ratchet::{senderkey, RatchetState};
 use logos_sealed::{seal, unseal, SealedEnvelope, SenderCertificate};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -47,6 +49,23 @@ const MAX_QUARANTINE_ATTEMPTS: u32 = 5;
 
 /// Bound on remembered consumed-initial fingerprints (red-team M3 replay protection).
 const MAX_SEEN_INITIALS: usize = 512;
+
+/// When our published one-time prekey pools drop to or below these watermarks, the
+/// client tops them back up to the full counts and republishes via `POST /v1/replenish`
+/// (M1). Prekeys are minted only at registration today, so without this they drain to
+/// the reusable last-resort KEM and silently lose initial-message forward secrecy —
+/// which group setup (many pairwise handshakes at once) accelerates.
+const OTK_LOW_WATERMARK: usize = 5;
+const KEM_LOW_WATERMARK: usize = 3;
+
+/// Soft cap on group size for sender-key v1 (join/remove cost is O(N)). Enforced
+/// client-side; the relay has no group concept (per-member posting), so it can't
+/// enforce this server-side.
+const MAX_GROUP_SIZE: usize = 32;
+
+/// Bound on buffered sender keys that arrived before their group invite, so an
+/// out-of-order bootstrap still completes — FIFO-evicted past this.
+const MAX_PENDING_GROUP_KEYS: usize = 256;
 
 /// Errors from the client engine. The variants the UI must treat differently are
 /// **typed** (not stringly): `IdentityChanged` drives the high-friction identity
@@ -233,6 +252,22 @@ struct Store {
     /// the mailbox forever (red-team M4).
     #[serde(default)]
     quarantine: HashMap<u64, u32>,
+    /// Monotonic next-id counters for *replenished* one-time prekeys (M1), so a
+    /// freshly minted prekey never reuses an id still live on the relay. `0`
+    /// (legacy/default) means "uninitialized" and is lazily set past the max
+    /// existing id on first replenish.
+    #[serde(default)]
+    next_one_time_id: u32,
+    #[serde(default)]
+    next_kem_id: u32,
+    /// E2EE group state (P4.0a), keyed by hex group id. `#[serde(default)]` so older
+    /// stores (which have no groups) keep deserializing.
+    #[serde(default)]
+    groups: HashMap<String, GroupRecord>,
+    /// Sender keys received before their group's invite, buffered for out-of-order
+    /// bootstrap delivery (bounded FIFO).
+    #[serde(default)]
+    pending_group_keys: Vec<PendingSenderKey>,
 }
 
 impl Drop for Store {
@@ -255,6 +290,15 @@ impl Drop for Store {
         for session in self.sessions.values_mut() {
             session.ratchet.zeroize();
         }
+        // Group secrets: the per-group signing seed (plain array) plus any buffered
+        // sender-chain keys. The send/receive chains themselves are `ZeroizeOnDrop`,
+        // so they clear when the records drop with the map.
+        for rec in self.groups.values_mut() {
+            rec.my_signing_secret.zeroize();
+        }
+        for p in &mut self.pending_group_keys {
+            p.dist.chain_key.zeroize();
+        }
     }
 }
 /// Safety-number confirmation + identity-change tracking for one contact.
@@ -266,10 +310,50 @@ struct Verification {
     changes: u32,
 }
 
-/// A received, decrypted message.
+/// Per-group state for sender-key group chats (P4.0a). `my_sender` is our own
+/// forward-ratcheting send chain; `peers` holds one receiver chain + signing public
+/// key per other member. `my_signing_secret` is the 32-byte seed of our per-group
+/// Ed25519 signing key (zeroized in `Store::drop`; the chains zeroize themselves).
+#[derive(Serialize, Deserialize)]
+struct GroupRecord {
+    meta: GroupMeta,
+    my_signing_secret: [u8; 32],
+    my_sender: senderkey::SenderChain,
+    peers: HashMap<String, PeerSender>,
+    /// Members we've already sent our sender key to (avoids re-sending every poll).
+    #[serde(default)]
+    distributed: HashSet<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PeerSender {
+    signing_pub: [u8; 32],
+    chain: senderkey::ReceiverChain,
+}
+
+/// A sender key that arrived before its group's invite; applied once the invite
+/// creates the group (handles out-of-order bootstrap delivery).
+#[derive(Serialize, Deserialize)]
+struct PendingSenderKey {
+    group_id: [u8; 16],
+    from: String,
+    dist: SenderKeyDist,
+}
+
+/// A received, decrypted message. `group` is `Some(group_id_hex)` for a group message
+/// and `None` for a 1:1 message.
 pub struct Incoming {
     pub from: String,
     pub text: String,
+    pub group: Option<String>,
+}
+
+/// Summary of a group the client belongs to (for listing / UI).
+pub struct GroupInfo {
+    pub id: String,
+    pub name: String,
+    pub members: Vec<String>,
+    pub admins: Vec<String>,
 }
 
 pub struct Client {
@@ -518,6 +602,10 @@ impl Client {
             cert: None,
             seen_initials: VecDeque::new(),
             quarantine: HashMap::new(),
+            next_one_time_id: ONE_TIME_PREKEY_COUNT + 1,
+            next_kem_id: KEM_PREKEY_COUNT + 1,
+            groups: HashMap::new(),
+            pending_group_keys: Vec::new(),
         };
         let mut me = Self {
             store,
@@ -571,6 +659,14 @@ impl Client {
 
     pub fn username(&self) -> &str {
         &self.store.username
+    }
+
+    /// Diagnostic/test only: the number of unused one-time X25519 and ML-KEM prekey
+    /// secrets the client currently holds locally. Used by the M1 replenishment test
+    /// to assert the pool refills after inbound handshakes drain it.
+    #[doc(hidden)]
+    pub fn local_prekey_counts(&self) -> (usize, usize) {
+        (self.store.one_time.len(), self.store.kem_one_time.len())
     }
 
     fn identity(&self) -> IdentityKeyPair {
@@ -682,27 +778,148 @@ impl Client {
         Ok(())
     }
 
-    /// Encrypt and deliver `message` to `to`.
+    /// Top the published one-time prekey pools back up when they run low, and
+    /// publish the fresh prekeys to the relay (M1). Best-effort: callers ignore a
+    /// network failure and retry on the next poll.
+    ///
+    /// The new prekey **secrets are persisted before their publics are posted**, so
+    /// a crash mid-replenish can never leave the relay handing out a prekey whose
+    /// secret we don't hold (same durability rule as `send`).
+    fn maybe_replenish_prekeys(&mut self) -> Result<()> {
+        let otk_needed = self.store.one_time.len() <= OTK_LOW_WATERMARK;
+        let kem_needed = self.store.kem_one_time.len() <= KEM_LOW_WATERMARK;
+        if !otk_needed && !kem_needed {
+            return Ok(());
+        }
+        let identity = self.identity();
+
+        let mut otk_pub = Vec::new();
+        if otk_needed {
+            // Lazily initialize the id counter for legacy stores (default 0) past any
+            // existing id so a replenished prekey can't collide with a live one.
+            if self.store.next_one_time_id == 0 {
+                self.store.next_one_time_id = self
+                    .store
+                    .one_time
+                    .iter()
+                    .map(|o| o.id)
+                    .max()
+                    .unwrap_or(0)
+                    .max(ONE_TIME_PREKEY_COUNT)
+                    + 1;
+            }
+            let deficit = ONE_TIME_PREKEY_COUNT as usize - self.store.one_time.len();
+            for _ in 0..deficit {
+                let id = self.store.next_one_time_id;
+                self.store.next_one_time_id += 1;
+                let (p, s) = new_one_time_prekey(id);
+                otk_pub.push(p);
+                self.store.one_time.push(OtkSecret {
+                    id,
+                    secret: s.secret.to_bytes(),
+                });
+            }
+        }
+
+        let mut kem_pub = Vec::new();
+        if kem_needed {
+            if self.store.next_kem_id == 0 {
+                self.store.next_kem_id = self
+                    .store
+                    .kem_one_time
+                    .iter()
+                    .map(|k| k.id)
+                    .max()
+                    .unwrap_or(0)
+                    .max(KEM_PREKEY_COUNT)
+                    + 1;
+            }
+            let deficit = KEM_PREKEY_COUNT as usize - self.store.kem_one_time.len();
+            for _ in 0..deficit {
+                let id = self.store.next_kem_id;
+                self.store.next_kem_id += 1;
+                let (p, s) = new_kem_prekey(id, &identity);
+                kem_pub.push(p);
+                self.store.kem_one_time.push(KemSecretRec {
+                    id,
+                    secret: s.secret.to_bytes(),
+                });
+            }
+        }
+
+        // Persist the new secrets BEFORE publishing their publics (durability).
+        self.save()?;
+
+        let sig = identity
+            .sign(&replenish_signed_bytes(
+                &self.store.username,
+                &identity.public(),
+            ))
+            .to_vec();
+        let req = ReplenishRequest {
+            username: self.store.username.clone(),
+            identity: identity.public(),
+            one_time_prekeys: otk_pub,
+            kem_prekeys: kem_pub,
+            sig,
+        };
+        self.http
+            .post(format!("{}/v1/replenish", self.server_url))
+            .json(&req)
+            .send()
+            .map_err(net)?
+            .error_for_status()
+            .map_err(net)?;
+        Ok(())
+    }
+
+    /// Encrypt and deliver a 1:1 `message` to `to`.
     pub fn send(&mut self, to: &str, message: &str) -> Result<()> {
+        self.deliver_pairwise(to, message.as_bytes(), false)
+    }
+
+    /// Send a group control message (invite / sender-key distribution) to `to` over
+    /// the pairwise Double Ratchet, so it's E2EE and bound to the 1:1 identity.
+    fn send_group_control(&mut self, to: &str, ctrl: &GroupControl) -> Result<()> {
+        let bytes = serde_json::to_vec(ctrl).map_err(err)?;
+        self.deliver_pairwise(to, &bytes, true)
+    }
+
+    /// Shared pairwise delivery for 1:1 text (`control == false`) and group control
+    /// messages (`control == true`): encrypt `plaintext` under the peer's Double
+    /// Ratchet, wrap it in the right `OuterMessage` variant, seal, and post.
+    ///
+    /// encrypt() advances the sending chain (consuming one message key, whose derived
+    /// AEAD key+nonce are deterministic). That advance MUST be durable BEFORE the
+    /// ciphertext leaves the device: a crash between a successful POST and save() would
+    /// roll the chain back and reuse the same key+nonce on different plaintext — a
+    /// catastrophic two-time-pad/forgery break. `sent_initial` flips only after a
+    /// successful POST, so a failed first delivery re-sends as a fresh prekey message.
+    fn deliver_pairwise(&mut self, to: &str, plaintext: &[u8], control: bool) -> Result<()> {
         self.ensure_session(to)?;
         let cert = self.ensure_cert()?;
 
         let session = self.store.sessions.get_mut(to).expect("session ensured");
-        // encrypt() advances the sending chain (consumes one message key, whose
-        // derived AEAD key+nonce are deterministic). That advance MUST be made
-        // durable BEFORE the ciphertext leaves the device: otherwise a crash
-        // between a successful POST and save() would roll the chain back, and the
-        // next send would reuse the same key+nonce on different plaintext — a
-        // catastrophic two-time-pad/forgery break of ChaCha20-Poly1305.
-        let ratchet_msg = session.ratchet.encrypt(message.as_bytes(), b"");
+        let ratchet_msg = session.ratchet.encrypt(plaintext, b"");
         let is_initial = !session.sent_initial;
-        let outer = if is_initial {
-            let initial = session
-                .pending_initial
-                .clone()
-                .ok_or_else(|| ClientError::other("missing initial"))?;
-            OuterMessage::Prekey {
+        let initial = if is_initial {
+            Some(
+                session
+                    .pending_initial
+                    .clone()
+                    .ok_or_else(|| ClientError::other("missing initial"))?,
+            )
+        } else {
+            None
+        };
+        let outer = if control {
+            OuterMessage::GroupCtrl {
                 initial,
+                ratchet: ratchet_msg,
+            }
+        } else if is_initial {
+            OuterMessage::Prekey {
+                initial: initial.expect("is_initial implies a pending initial"),
                 ratchet: ratchet_msg,
             }
         } else {
@@ -716,10 +933,6 @@ impl Client {
         let envelope = seal(&peer_identity.dh, &cert, &outer_bytes).map_err(err)?;
         let id = mailbox_id(&peer_identity);
 
-        // Persist the advanced ratchet before transmitting. `sent_initial` is left
-        // false until the POST succeeds, so if delivery fails the message is
-        // re-sent as a fresh prekey message (with the next, distinct key) rather
-        // than being lost or causing key reuse.
         self.save()?;
         self.http
             .post(format!("{}/v1/mailbox/{id}", self.server_url))
@@ -821,6 +1034,15 @@ impl Client {
                 .send()
                 .and_then(|r| r.error_for_status());
         }
+
+        // Group bootstrap: send our sender key to any members we still owe it to.
+        // Best-effort and idempotent; retried each poll until every pair is covered.
+        self.redistribute_group_keys();
+
+        // M1: if inbound prekey messages drained our published pool, top it back up
+        // and republish. Best-effort — a failure just retries on the next poll and
+        // must not drop the messages we already decrypted.
+        let _ = self.maybe_replenish_prekeys();
         Ok(out)
     }
 
@@ -851,44 +1073,41 @@ impl Client {
         };
         match outer {
             OuterMessage::Prekey { initial, ratchet } => {
-                // Never let an inbound prekey (session-initiation) message reset an
-                // EXISTING session. Otherwise a replayed initial envelope — which
-                // re-derives the same root key whenever the handshake used the
-                // reusable last-resort KEM prekey / no one-time X25519 prekey —
-                // would clobber the live ratchet and break the conversation. A
-                // genuine re-key requires an explicit, out-of-band session reset.
-                if self.store.sessions.contains_key(&from) {
-                    return Ok(None);
+                match self.decrypt_pairwise(&cert, Some(initial), ratchet)? {
+                    Some(pt) => Ok(Some(Incoming {
+                        from,
+                        text: String::from_utf8_lossy(&pt).into_owned(),
+                        group: None,
+                    })),
+                    None => Ok(None),
                 }
-                // M3: reject a replayed initial even after `reset_session` cleared the
-                // live session — otherwise a relay could redeliver an old captured
-                // handshake and lock the conversation onto stale state.
-                let fp = initial_fingerprint(&initial, &ratchet);
-                if self.store.seen_initials.contains(&fp) {
-                    return Ok(None);
-                }
-                let text = self.establish_and_decrypt(&cert, initial, ratchet)?;
-                self.remember_initial(fp);
-                Ok(Some(Incoming { from, text }))
             }
             OuterMessage::Normal { ratchet } => {
-                match self.store.sessions.get_mut(&from) {
-                    Some(session) => match session.ratchet.decrypt(&ratchet, b"") {
-                        Ok(pt) => Ok(Some(Incoming {
-                            from,
-                            text: String::from_utf8_lossy(&pt).into_owned(),
-                        })),
-                        // The transactional ratchet left state untouched. A Normal
-                        // message that no longer decrypts on a live session is a
-                        // replay/corrupt duplicate (the real one was already
-                        // consumed) — ACK-and-drop so it can't stick forever.
-                        Err(_) => Ok(None),
-                    },
-                    // No session yet: this may be a message reordered ahead of its
-                    // establishing prekey message — keep it for a later attempt.
-                    None => Err(ClientError::other(format!("no session for {from}"))),
+                match self.decrypt_pairwise(&cert, None, ratchet)? {
+                    Some(pt) => Ok(Some(Incoming {
+                        from,
+                        text: String::from_utf8_lossy(&pt).into_owned(),
+                        group: None,
+                    })),
+                    None => Ok(None),
                 }
             }
+            // Group control plane: decrypted over the pairwise session, then applied
+            // (invite / sender-key distribution). Not surfaced as a chat message.
+            OuterMessage::GroupCtrl { initial, ratchet } => {
+                match self.decrypt_pairwise(&cert, initial, ratchet)? {
+                    Some(pt) => self.handle_group_control(&from, &pt),
+                    None => Ok(None),
+                }
+            }
+            // Group data plane: sender-key-encrypted, authenticated by the sender's
+            // per-group Ed25519 signature.
+            OuterMessage::Group {
+                group_id,
+                iteration,
+                ciphertext,
+                signature,
+            } => self.process_group_message(&from, group_id, iteration, &ciphertext, &signature),
         }
     }
 
@@ -1000,12 +1219,471 @@ impl Client {
         }
     }
 
+    // ---- E2EE group chat (sender-key v1, P4.0a) ----
+
+    /// Create a new E2EE group named `name` with `members` (usernames, excluding
+    /// self). Generates our per-group sender + signing keys, records the group, and
+    /// invites each member (group metadata + our sender key) over their pairwise
+    /// session. Returns the hex group id.
+    pub fn create_group(&mut self, name: &str, members: &[&str]) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() || name.len() > 128 {
+            return Err(ClientError::other("group name must be 1..=128 characters"));
+        }
+        let me = self.store.username.clone();
+        let mut roster: Vec<String> = Vec::new();
+        for &m in members {
+            if me == m || roster.iter().any(|r| *r == m) {
+                continue;
+            }
+            if validate_username(m).is_err() {
+                return Err(ClientError::InvalidUsername {
+                    reason: format!("'{m}' is not a valid username"),
+                });
+            }
+            roster.push(m.to_string());
+        }
+        if roster.is_empty() {
+            return Err(ClientError::other(
+                "a group needs at least one other member",
+            ));
+        }
+        if roster.len() + 1 > MAX_GROUP_SIZE {
+            return Err(ClientError::other(format!(
+                "group too large (max {MAX_GROUP_SIZE} members)"
+            )));
+        }
+
+        let mut all_members = vec![me.clone()];
+        all_members.extend(roster.iter().cloned());
+
+        let mut group_id = [0u8; 16];
+        use rand::RngCore;
+        rand::rngs::OsRng.fill_bytes(&mut group_id);
+        let gid_hex = group_id_hex(&group_id);
+
+        let my_signing = GroupSigningKey::generate();
+        let my_sender = senderkey::SenderChain::generate();
+        let invite_dist = SenderKeyDist {
+            chain_key: my_sender.chain_key(),
+            iteration: my_sender.iteration(),
+            signing_pub: my_signing.public_bytes(),
+        };
+        let meta = GroupMeta {
+            id: group_id,
+            name: name.to_string(),
+            members: all_members,
+            admins: vec![me.clone()],
+            created_unix: now(),
+        };
+
+        // Invite every member (metadata + our sender key) over their pairwise session.
+        for member in &roster {
+            self.send_group_control(
+                member,
+                &GroupControl::Invite {
+                    group: meta.clone(),
+                    sender_key: invite_dist.clone(),
+                },
+            )?;
+        }
+
+        // The invite carried our sender key, so every invited member is "distributed to".
+        let distributed: HashSet<String> = roster.iter().cloned().collect();
+        self.store.groups.insert(
+            gid_hex.clone(),
+            GroupRecord {
+                meta,
+                my_signing_secret: my_signing.secret_bytes(),
+                my_sender,
+                peers: HashMap::new(),
+                distributed,
+            },
+        );
+        self.save()?;
+        Ok(gid_hex)
+    }
+
+    /// Encrypt and deliver `message` to every member of the group (by hex id). One
+    /// sender-key ciphertext is signed once and posted to each member's mailbox
+    /// (per-member fan-out; the relay has no group concept in v1).
+    pub fn send_group(&mut self, group_id_hex_str: &str, message: &str) -> Result<()> {
+        let (group_id, members, signing_secret) = {
+            let rec = self
+                .store
+                .groups
+                .get(group_id_hex_str)
+                .ok_or_else(|| ClientError::other("unknown group"))?;
+            let me = &self.store.username;
+            let members: Vec<String> = rec
+                .meta
+                .members
+                .iter()
+                .filter(|m| *m != me)
+                .cloned()
+                .collect();
+            (rec.meta.id, members, rec.my_signing_secret)
+        };
+
+        // Advance our sender chain (durably persisted before any POST) and sign.
+        let (iteration, ciphertext) = {
+            let rec = self
+                .store
+                .groups
+                .get_mut(group_id_hex_str)
+                .expect("group present");
+            rec.my_sender.encrypt(message.as_bytes(), &group_id)
+        };
+        let signing = GroupSigningKey::from_secret(&signing_secret);
+        let signature = signing
+            .sign(&group_message_signed_bytes(
+                &group_id,
+                iteration,
+                &ciphertext,
+            ))
+            .to_vec();
+        let outer = OuterMessage::Group {
+            group_id,
+            iteration,
+            ciphertext,
+            signature,
+        };
+        let outer_bytes = serde_json::to_vec(&outer).map_err(err)?;
+        let cert = self.ensure_cert()?;
+
+        // Persist the advanced sender chain BEFORE any POST: never reuse an
+        // iteration's key on different plaintext.
+        self.save()?;
+
+        for member in members {
+            let peer_identity = self.peer_identity_for(&member)?;
+            let envelope = seal(&peer_identity.dh, &cert, &outer_bytes).map_err(err)?;
+            let id = mailbox_id(&peer_identity);
+            self.http
+                .post(format!("{}/v1/mailbox/{id}", self.server_url))
+                .json(&PostEnvelope { envelope })
+                .send()
+                .map_err(net)?
+                .error_for_status()
+                .map_err(net)?;
+        }
+        Ok(())
+    }
+
+    /// The groups this client belongs to.
+    pub fn groups(&self) -> Vec<GroupInfo> {
+        self.store
+            .groups
+            .values()
+            .map(|r| GroupInfo {
+                id: group_id_hex(&r.meta.id),
+                name: r.meta.name.clone(),
+                members: r.meta.members.clone(),
+                admins: r.meta.admins.clone(),
+            })
+            .collect()
+    }
+
+    /// Member usernames of a group (by hex id), or `None` if we're not in it.
+    pub fn group_members(&self, group_id_hex_str: &str) -> Option<Vec<String>> {
+        self.store
+            .groups
+            .get(group_id_hex_str)
+            .map(|r| r.meta.members.clone())
+    }
+
+    /// Resolve a peer's identity for sealing — from the TOFU pin if present, else by
+    /// establishing a session (which fetches + pins it from the directory).
+    fn peer_identity_for(&mut self, user: &str) -> Result<IdentityPublic> {
+        if let Some(id) = self.store.contacts.get(user) {
+            return Ok(*id);
+        }
+        self.ensure_session(user)?;
+        self.store
+            .contacts
+            .get(user)
+            .copied()
+            .ok_or_else(|| ClientError::other("no identity for member"))
+    }
+
+    /// Handle a decrypted group control message received over a pairwise session.
+    fn handle_group_control(&mut self, from: &str, plaintext: &[u8]) -> Result<Option<Incoming>> {
+        let ctrl: GroupControl = match serde_json::from_slice(plaintext) {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+        match ctrl {
+            GroupControl::Invite { group, sender_key } => {
+                self.handle_invite(from, group, sender_key)
+            }
+            GroupControl::SenderKey {
+                group_id,
+                sender_key,
+            } => {
+                let gid_hex = group_id_hex(&group_id);
+                if self.store.groups.contains_key(&gid_hex) {
+                    self.insert_peer_sender(&gid_hex, from, &sender_key);
+                } else {
+                    self.stash_pending_key(group_id, from, sender_key);
+                }
+                let _ = self.save();
+                Ok(None)
+            }
+        }
+    }
+
+    /// Process a group invite: if the group is new, create our state, drain any
+    /// early-arriving sender keys, and distribute our own sender key to the other
+    /// members. Idempotent on a duplicate invite.
+    fn handle_invite(
+        &mut self,
+        from: &str,
+        group: GroupMeta,
+        sender_key: SenderKeyDist,
+    ) -> Result<Option<Incoming>> {
+        // The inviter must be a listed member (the cert already proved who `from` is),
+        // and we must be in the roster.
+        if !group.members.iter().any(|m| *m == from) {
+            return Ok(None);
+        }
+        let me = self.store.username.clone();
+        if !group.members.contains(&me) {
+            return Ok(None);
+        }
+        let gid_hex = group_id_hex(&group.id);
+        if self.store.groups.contains_key(&gid_hex) {
+            // Duplicate invite: record the inviter's sender key if we lack it.
+            self.insert_peer_sender(&gid_hex, from, &sender_key);
+            let _ = self.save();
+            return Ok(None);
+        }
+
+        let my_signing = GroupSigningKey::generate();
+        let my_sender = senderkey::SenderChain::generate();
+        let mut peers = HashMap::new();
+        peers.insert(
+            from.to_string(),
+            PeerSender {
+                signing_pub: sender_key.signing_pub,
+                chain: senderkey::ReceiverChain::new(sender_key.chain_key, sender_key.iteration),
+            },
+        );
+        let group_id = group.id;
+        self.store.groups.insert(
+            gid_hex.clone(),
+            GroupRecord {
+                meta: group,
+                my_signing_secret: my_signing.secret_bytes(),
+                my_sender,
+                peers,
+                distributed: HashSet::new(),
+            },
+        );
+        // Apply any sender keys that arrived before this invite. Sending OUR key to the
+        // other members is left to the post-recv redistribution (which respects the
+        // canonical-initiator rule to avoid simultaneous session establishment).
+        self.drain_pending_keys(&gid_hex, &group_id);
+        self.save()?;
+        Ok(None)
+    }
+
+    /// Record a peer's sender key for a known group (first one wins; a duplicate
+    /// distribution is ignored so it can't reset an already-advanced receive chain).
+    fn insert_peer_sender(&mut self, gid_hex: &str, from: &str, dist: &SenderKeyDist) {
+        if let Some(rec) = self.store.groups.get_mut(gid_hex) {
+            if !rec.meta.members.iter().any(|m| *m == from) {
+                return;
+            }
+            rec.peers
+                .entry(from.to_string())
+                .or_insert_with(|| PeerSender {
+                    signing_pub: dist.signing_pub,
+                    chain: senderkey::ReceiverChain::new(dist.chain_key, dist.iteration),
+                });
+        }
+    }
+
+    /// Buffer a sender key whose group we don't know yet (invite not arrived).
+    fn stash_pending_key(&mut self, group_id: [u8; 16], from: &str, dist: SenderKeyDist) {
+        if let Some(p) = self
+            .store
+            .pending_group_keys
+            .iter_mut()
+            .find(|p| p.group_id == group_id && p.from == from)
+        {
+            p.dist = dist;
+            return;
+        }
+        if self.store.pending_group_keys.len() >= MAX_PENDING_GROUP_KEYS {
+            self.store.pending_group_keys.remove(0);
+        }
+        self.store.pending_group_keys.push(PendingSenderKey {
+            group_id,
+            from: from.to_string(),
+            dist,
+        });
+    }
+
+    /// Apply and remove any buffered sender keys for a newly created group.
+    fn drain_pending_keys(&mut self, gid_hex: &str, group_id: &[u8; 16]) {
+        let matching: Vec<PendingSenderKey> = {
+            let mut keep = Vec::new();
+            let mut take = Vec::new();
+            for p in self.store.pending_group_keys.drain(..) {
+                if &p.group_id == group_id {
+                    take.push(p);
+                } else {
+                    keep.push(p);
+                }
+            }
+            self.store.pending_group_keys = keep;
+            take
+        };
+        for p in matching {
+            self.insert_peer_sender(gid_hex, &p.from, &p.dist);
+        }
+    }
+
+    /// Send our sender key to any group members we haven't distributed to yet. To
+    /// avoid two members simultaneously initiating a pairwise session to each other
+    /// (which the replay guard would make both drop), we only INITIATE when we're the
+    /// canonical initiator (`me < member`); otherwise we wait until a session exists
+    /// (the peer initiates and we reply over it). Called at the end of `recv`, so it
+    /// retries across polls until every member has our key. Best-effort per member.
+    fn redistribute_group_keys(&mut self) {
+        let me = self.store.username.clone();
+        let mut work: Vec<(String, [u8; 16], String, SenderKeyDist)> = Vec::new();
+        for (gid_hex, rec) in &self.store.groups {
+            let dist = SenderKeyDist {
+                chain_key: rec.my_sender.chain_key(),
+                iteration: rec.my_sender.iteration(),
+                signing_pub: GroupSigningKey::from_secret(&rec.my_signing_secret).public_bytes(),
+            };
+            for m in &rec.meta.members {
+                if *m == me || rec.distributed.contains(m) {
+                    continue;
+                }
+                if self.store.sessions.contains_key(m) || me < *m {
+                    work.push((gid_hex.clone(), rec.meta.id, m.clone(), dist.clone()));
+                }
+            }
+        }
+        for (gid_hex, group_id, member, dist) in work {
+            if self
+                .send_group_control(
+                    &member,
+                    &GroupControl::SenderKey {
+                        group_id,
+                        sender_key: dist,
+                    },
+                )
+                .is_ok()
+            {
+                if let Some(rec) = self.store.groups.get_mut(&gid_hex) {
+                    rec.distributed.insert(member);
+                }
+            }
+        }
+    }
+
+    /// Decrypt and authenticate an inbound group (sender-key) message.
+    fn process_group_message(
+        &mut self,
+        from: &str,
+        group_id: [u8; 16],
+        iteration: u32,
+        ciphertext: &[u8],
+        signature: &[u8],
+    ) -> Result<Option<Incoming>> {
+        let gid_hex = group_id_hex(&group_id);
+        // Unknown group: keep for a later attempt (the invite may be in flight).
+        if !self.store.groups.contains_key(&gid_hex) {
+            return Err(ClientError::other("unknown group"));
+        }
+        let sig_arr: [u8; 64] = match signature.try_into() {
+            Ok(a) => a,
+            Err(_) => return Ok(None),
+        };
+        // No sender key yet: quarantine (distribution may still be in flight).
+        let signing_pub = match self
+            .store
+            .groups
+            .get(&gid_hex)
+            .and_then(|r| r.peers.get(from))
+        {
+            Some(p) => p.signing_pub,
+            None => return Err(ClientError::other("no sender key for group sender")),
+        };
+        // Verify the per-group signature BEFORE decrypting — every member knows the
+        // symmetric chain key, so only the signature proves the true sender. A bad
+        // signature is a forgery: drop it.
+        if !verify_ed25519(
+            &signing_pub,
+            &group_message_signed_bytes(&group_id, iteration, ciphertext),
+            &sig_arr,
+        ) {
+            return Ok(None);
+        }
+        let rec = self.store.groups.get_mut(&gid_hex).expect("group present");
+        let peer = rec.peers.get_mut(from).expect("sender key present");
+        match peer.chain.decrypt(iteration, ciphertext, &group_id) {
+            Ok(pt) => Ok(Some(Incoming {
+                from: from.to_string(),
+                text: String::from_utf8_lossy(&pt).into_owned(),
+                group: Some(gid_hex),
+            })),
+            // Replay / already-consumed / too-far-ahead: drop (ACK).
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Decrypt the pairwise-ratchet payload of a `Prekey`/`Normal`/`GroupCtrl`
+    /// envelope from `cert.sender_username`. `Ok(Some(bytes))` delivers the plaintext,
+    /// `Ok(None)` is a replay/duplicate to ACK-drop, and `Err` means no session yet
+    /// (quarantine for a later attempt).
+    fn decrypt_pairwise(
+        &mut self,
+        cert: &SenderCertificate,
+        initial: Option<InitialMessage>,
+        ratchet: logos_ratchet::RatchetMessage,
+    ) -> Result<Option<Vec<u8>>> {
+        let from = cert.sender_username.clone();
+        match initial {
+            Some(initial) => {
+                // An inbound session-initiation must never reset an EXISTING session
+                // (a replayed initial re-derives the same root key with the reusable
+                // last-resort KEM). A genuine re-key needs an explicit session reset.
+                if self.store.sessions.contains_key(&from) {
+                    return Ok(None);
+                }
+                // M3: reject a replayed initial even after `reset_session`.
+                let fp = initial_fingerprint(&initial, &ratchet);
+                if self.store.seen_initials.contains(&fp) {
+                    return Ok(None);
+                }
+                let pt = self.establish_and_decrypt(cert, initial, ratchet)?;
+                self.remember_initial(fp);
+                Ok(Some(pt))
+            }
+            None => match self.store.sessions.get_mut(&from) {
+                Some(session) => match session.ratchet.decrypt(&ratchet, b"") {
+                    Ok(pt) => Ok(Some(pt)),
+                    // A Normal message that no longer decrypts on a live session is a
+                    // replay/corrupt duplicate — ACK-and-drop.
+                    Err(_) => Ok(None),
+                },
+                // No session yet: may be reordered ahead of its prekey — quarantine.
+                None => Err(ClientError::other(format!("no session for {from}"))),
+            },
+        }
+    }
+
     fn establish_and_decrypt(
         &mut self,
         cert: &SenderCertificate,
         initial: InitialMessage,
         ratchet_msg: logos_ratchet::RatchetMessage,
-    ) -> Result<String> {
+    ) -> Result<Vec<u8>> {
         // F-02/F-03: the sealed-sender cert is only delivery authorization. The
         // real sender identity is the PQXDH initiator identity (proven by the
         // handshake DH legs). Bind them, then TOFU-pin — so a malicious relay
@@ -1082,7 +1760,7 @@ impl Client {
                 pending_initial: None,
             },
         );
-        Ok(String::from_utf8_lossy(&pt).into_owned())
+        Ok(pt)
     }
 }
 

@@ -121,6 +121,12 @@ pub struct ServerKeyResponse {
 }
 
 /// The inner (sealed) payload exchanged between clients.
+///
+/// `Prekey`/`Normal` are the 1:1 channel and are unchanged on the wire (so existing
+/// clients keep interoperating). `GroupCtrl`/`Group` add E2EE group chats (P4.0a):
+/// the control plane rides the pairwise Double Ratchet, the data plane uses sender
+/// keys. A client that predates groups will simply fail to parse the new variants and
+/// drop them — but it only ever receives them if a group peer sends to it.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum OuterMessage {
     /// First message of a session: carries the PQXDH initial message + first ratchet message.
@@ -130,6 +136,87 @@ pub enum OuterMessage {
     },
     /// Subsequent messages on an established session.
     Normal { ratchet: RatchetMessage },
+    /// Group **control** plane (sender-key distribution, invites), carried encrypted
+    /// over the pairwise Double Ratchet so it inherits the 1:1 identity binding.
+    /// `initial` is `Some` iff this envelope also establishes the pairwise session
+    /// (the group analogue of `Prekey`).
+    GroupCtrl {
+        initial: Option<InitialMessage>,
+        ratchet: RatchetMessage,
+    },
+    /// Group **data** plane: a sender-key-encrypted message. Not wrapped in the
+    /// pairwise ratchet — the recipient decrypts it with the sender's distributed
+    /// sender key for `group_id`, after verifying `signature` (sender's per-group
+    /// Ed25519 key) over the group id, iteration, and ciphertext. `signature` is a
+    /// 64-byte Ed25519 signature (kept as `Vec<u8>` since serde arrays stop at 32).
+    Group {
+        group_id: [u8; 16],
+        iteration: u32,
+        ciphertext: Vec<u8>,
+        signature: Vec<u8>,
+    },
+}
+
+/// Stable hex rendering of a 16-byte group id, used as the client store's map key and
+/// for display.
+pub fn group_id_hex(id: &[u8; 16]) -> String {
+    hex::encode(id)
+}
+
+/// Shared metadata for an E2EE group (sender-key v1). Members/admins are usernames;
+/// each client resolves and TOFU-pins the real identities itself (the creator's view
+/// is advisory, never trusted for sealing). Name/avatar are not cryptographically
+/// bound in v1 (a malicious relay can show divergent names) — MLS (P4.1) fixes this.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct GroupMeta {
+    pub id: [u8; 16],
+    pub name: String,
+    pub members: Vec<String>,
+    pub admins: Vec<String>,
+    pub created_unix: u64,
+}
+
+/// A member's sender key as distributed to peers: the current chain key + iteration
+/// (so a later joiner can't read history) and the per-group Ed25519 signing public key.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SenderKeyDist {
+    pub chain_key: [u8; 32],
+    pub iteration: u32,
+    pub signing_pub: [u8; 32],
+}
+
+/// Control-plane message carried (encrypted) over a pairwise session to bootstrap and
+/// maintain a sender-key group.
+#[derive(Clone, Serialize, Deserialize)]
+pub enum GroupControl {
+    /// Sent by the creator to each initial member: full group metadata + the creator's
+    /// sender key. A recipient that doesn't know the group creates it locally and
+    /// distributes its own sender key to the other members.
+    Invite {
+        group: GroupMeta,
+        sender_key: SenderKeyDist,
+    },
+    /// A member publishing their own sender key for an already-known group.
+    SenderKey {
+        group_id: [u8; 16],
+        sender_key: SenderKeyDist,
+    },
+}
+
+/// Domain-separated bytes a group message's per-message Ed25519 signature covers:
+/// binds the group, position, and ciphertext so a signature can't be lifted across
+/// groups/positions, and another member (who shares the chain key) can't forge or
+/// alter a message and have it attributed to the real sender.
+pub fn group_message_signed_bytes(
+    group_id: &[u8; 16],
+    iteration: u32,
+    ciphertext: &[u8],
+) -> Vec<u8> {
+    let mut v = b"LogosGroupMsgv1".to_vec();
+    v.extend_from_slice(group_id);
+    v.extend_from_slice(&iteration.to_be_bytes());
+    v.extend_from_slice(ciphertext);
+    v
 }
 
 /// POST /v1/mailbox/:id — enqueue an opaque sealed envelope (sender→relay).

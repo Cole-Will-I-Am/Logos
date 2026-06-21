@@ -59,6 +59,12 @@ enum Command {
         username: String,
         phrase: Vec<String>,
     },
+    /// Create an E2EE group and invite members (usernames).
+    GroupCreate { name: String, members: Vec<String> },
+    /// Send an end-to-end-encrypted message to a group (by hex id).
+    GroupSend { group: String, message: Vec<String> },
+    /// List the groups this client belongs to.
+    Groups,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -82,7 +88,13 @@ fn main() -> anyhow::Result<()> {
                 println!("(no new messages)");
             }
             for m in msgs {
-                println!("{}: {}", m.from, m.text);
+                match &m.group {
+                    Some(gid) => {
+                        let short = &gid[..gid.len().min(8)];
+                        println!("[group {short}] {}: {}", m.from, m.text);
+                    }
+                    None => println!("{}: {}", m.from, m.text),
+                }
             }
         }
         Command::Whoami => {
@@ -102,6 +114,30 @@ fn main() -> anyhow::Result<()> {
                 password.as_deref(),
             )?;
             println!("restored '{}' (store: {})", client.username(), cli.store);
+        }
+        Command::GroupCreate { name, members } => {
+            let mut client = Client::load(&cli.store, &cli.server, password.as_deref())?;
+            let refs: Vec<&str> = members.iter().map(String::as_str).collect();
+            let id = client.create_group(&name, &refs)?;
+            println!(
+                "created group '{name}' ({id}) — invited {} member(s)",
+                members.len()
+            );
+        }
+        Command::GroupSend { group, message } => {
+            let mut client = Client::load(&cli.store, &cli.server, password.as_deref())?;
+            client.send_group(&group, &message.join(" "))?;
+            println!("sent to group {group}");
+        }
+        Command::Groups => {
+            let client = Client::load(&cli.store, &cli.server, password.as_deref())?;
+            let groups = client.groups();
+            if groups.is_empty() {
+                println!("(no groups)");
+            }
+            for g in groups {
+                println!("{}  {}  [{}]", g.id, g.name, g.members.join(", "));
+            }
         }
     }
     Ok(())

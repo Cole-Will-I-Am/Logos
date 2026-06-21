@@ -163,6 +163,55 @@ pub fn verify(id: &IdentityPublic, msg: &[u8], sig: &[u8]) -> Result<(), Identit
         .map_err(|_| IdentityError::BadSignature)
 }
 
+/// A standalone Ed25519 signing keypair, separate from the long-term identity. Used
+/// for the **per-group sender-key signature key** (P4.0a): each member signs their
+/// group messages with this so other members — who all share the symmetric sender
+/// chain key and could otherwise forge ciphertext — can authenticate the true sender.
+/// The 32-byte secret is persisted in the encrypted client store. `SigningKey` zeroizes
+/// its own secret on drop.
+pub struct GroupSigningKey {
+    inner: SigningKey,
+}
+
+impl GroupSigningKey {
+    /// Generate a fresh per-group signing keypair from OS entropy.
+    pub fn generate() -> Self {
+        Self {
+            inner: SigningKey::generate(&mut rand::rngs::OsRng),
+        }
+    }
+
+    /// Reconstruct from the 32-byte secret persisted in the store.
+    pub fn from_secret(secret: &[u8; 32]) -> Self {
+        Self {
+            inner: SigningKey::from_bytes(secret),
+        }
+    }
+
+    /// The 32-byte secret, for persistence (zeroize the buffer after storing).
+    pub fn secret_bytes(&self) -> [u8; 32] {
+        self.inner.to_bytes()
+    }
+
+    /// The 32-byte public key, distributed to peers in a `SenderKeyDist`.
+    pub fn public_bytes(&self) -> [u8; 32] {
+        self.inner.verifying_key().to_bytes()
+    }
+
+    pub fn sign(&self, msg: &[u8]) -> [u8; 64] {
+        self.inner.sign(msg).to_bytes()
+    }
+}
+
+/// Verify an Ed25519 signature against a raw 32-byte public key (for per-group
+/// sender-key message signatures). Returns `false` on a malformed key or bad sig.
+pub fn verify_ed25519(public: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> bool {
+    match VerifyingKey::from_bytes(public) {
+        Ok(vk) => vk.verify(msg, &Signature::from_bytes(sig)).is_ok(),
+        Err(_) => false,
+    }
+}
+
 /// An X25519 prekey signed by the identity (medium-term "signed prekey").
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SignedPreKeyPublic {

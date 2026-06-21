@@ -69,6 +69,63 @@ fn two_clients_exchange_messages_through_relay() {
 }
 
 #[test]
+fn prekey_pool_refills_after_inbound_prekeys_drain_it() {
+    // M1: prekeys are minted only at registration; inbound handshakes consume them.
+    // Once our local pool crosses the low watermark, recv() must republish fresh
+    // prekeys so the relay keeps handing out one-time prekeys (forward secrecy for
+    // initial messages) instead of falling back to the reusable last-resort KEM.
+    let url = start_relay();
+    let mut alice = Client::create(tmp("m1-alice"), &url, "alice_m1", Some("pw")).unwrap();
+
+    // 15 distinct peers each open a session to alice — every directory fetch pops one
+    // of her published one-time prekeys — then send a prekey message. recv() then
+    // consumes 15 of alice's local one-time prekeys (20 -> 5), tripping replenish.
+    for i in 0..15 {
+        let name = format!("peer_m1_{i}");
+        let mut p = Client::create(tmp(&format!("m1-{name}")), &url, &name, Some("pw")).unwrap();
+        p.send("alice_m1", "hi").unwrap();
+    }
+    let got = alice.recv().unwrap();
+    assert_eq!(got.len(), 15, "alice should receive all 15 prekey messages");
+
+    // Deterministic core check: the inbound handshakes consumed 15 one-time X25519
+    // prekeys (20 -> 5, tripping the watermark) and 10 one-time ML-KEM prekeys
+    // (10 -> 0). recv() must have refilled both pools back to their full counts.
+    assert_eq!(
+        alice.local_prekey_counts(),
+        (20, 10),
+        "client should refill its local prekey pools after the watermark trips"
+    );
+
+    // End-to-end check: the fresh prekeys must have been *published* to the relay, so
+    // the relay can keep handing out one-time prekeys past the 5 that remained
+    // pre-replenish. Six fetches all returning Some proves republication (without M1
+    // the relay's residual pool of 5 would yield a None by the 6th). The directory is
+    // rate-limited (burst 10, 1/s refill), so let the bucket recover before the burst.
+    let http = reqwest::blocking::Client::new();
+    std::thread::sleep(std::time::Duration::from_secs(8));
+    let mut some_count = 0;
+    for _ in 0..6 {
+        let resp = http
+            .get(format!("{url}/v1/directory/alice_m1"))
+            .send()
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "directory fetch was rate-limited"
+        );
+        let dir: logos_proto::DirectoryResponse = resp.json().unwrap();
+        if dir.bundle.one_time_prekey.is_some() {
+            some_count += 1;
+        }
+    }
+    assert_eq!(
+        some_count, 6,
+        "relay should serve one-time prekeys past the pre-replenish residual (got {some_count}/6)"
+    );
+}
+
+#[test]
 fn other_identity_cannot_read_or_drain_mailbox() {
     let url = start_relay();
     let mut alice = Client::create(tmp("a2"), &url, "alice2", Some("test-password")).unwrap();

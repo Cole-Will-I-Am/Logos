@@ -19,6 +19,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 type HmacSha256 = Hmac<Sha256>;
 
+pub mod senderkey;
+
 /// Bound on how many message keys we will skip in a single chain step before
 /// refusing — prevents a malicious header from forcing huge work.
 const MAX_SKIP: u32 = 1000;
