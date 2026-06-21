@@ -133,6 +133,7 @@ with `cargo test --workspace`; the iOS build is `gh workflow run build` (while p
 | **P3 — Key transparency** | append-only verifiable log of identity keys + client auditing/gossip (the real fix for relay-as-cert-authority; upgrades TOFU) | ⏳ |
 | **P4 — Groups (E2EE)** | sender-key small groups (v1) → `openmls`/MLS (P4.1) — design in [`GROUP_CHAT_PLAN.md`](GROUP_CHAT_PLAN.md). E2EE, NOT Telegram-style server-readable | ⏳ |
 | **P5 — Advanced privacy** | onion/mixnet transport, blinded/rotating mailbox ids, PSI contact discovery, multi-device | ⏳ |
+| **AI-native track** | private AI layer — design in [`AI_NATIVE_BLUEPRINT.md`](AI_NATIVE_BLUEPRINT.md). **AI-0 = BYOK** (user's own Anthropic/OpenAI/Ollama key, device→provider direct, relay never in the AI path; Keychain-stored) + 1:1 catch-up summary → local search/memory → group catch-up. Relay stays blind; cloud AI = explicit per-use consent | 🔜 |
 | **Cross-cutting hardening** | redb relay persistence + TTL, Argon2id client-store encryption, prekey-fetch rate limits, full zeroization, reproducible-build/binary-transparency CI | ⏳ |
 | **External security audit** | protocol + implementation + infra | 🔒 gate before any real-world use |
 
