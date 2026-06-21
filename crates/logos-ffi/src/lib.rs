@@ -25,6 +25,10 @@ pub enum LogosError {
     /// The peer isn't registered on this relay (unknown username / typo).
     #[error("'{peer}' isn't registered on this relay")]
     NotRegistered { peer: String },
+    /// The chosen username is already taken on this relay — onboarding should ask
+    /// for a different name (the relay was reached; it refused the name).
+    #[error("the username '{username}' is already taken")]
+    UsernameTaken { username: String },
     /// Transport-level failure reaching the relay. Retryable.
     #[error("{msg}")]
     Network { msg: String },
@@ -39,6 +43,7 @@ impl From<logos_client::ClientError> for LogosError {
         match e {
             C::IdentityChanged { peer } => LogosError::IdentityChanged { peer },
             C::NotRegistered { peer } => LogosError::NotRegistered { peer },
+            C::UsernameTaken { username } => LogosError::UsernameTaken { username },
             C::Network(msg) => LogosError::Network { msg },
             C::Other(msg) => LogosError::Client { msg },
         }

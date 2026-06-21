@@ -55,6 +55,11 @@ pub enum ClientError {
     /// The peer has no directory entry on this relay (not registered / typo).
     #[error("'{peer}' isn't registered on this relay")]
     NotRegistered { peer: String },
+    /// The chosen username is already registered on this relay (HTTP 409). Surfaced
+    /// distinctly so onboarding says "pick another name" instead of a misleading
+    /// "can't reach the relay" (the relay was reached — it refused the name).
+    #[error("the username '{username}' is already taken on this relay")]
+    UsernameTaken { username: String },
     /// Transport-level failure reaching the relay. Retryable.
     #[error("network error: {0}")]
     Network(String),
@@ -277,12 +282,19 @@ impl Client {
         };
 
         let http = http_client();
-        http.post(format!("{server_url}/v1/register"))
+        let reg_resp = http
+            .post(format!("{server_url}/v1/register"))
             .json(&req)
             .send()
-            .map_err(net)?
-            .error_for_status()
             .map_err(net)?;
+        // A 409 means the relay was reached and refused the name — surface it as a
+        // distinct, actionable error rather than a generic transport failure.
+        if reg_resp.status() == reqwest::StatusCode::CONFLICT {
+            return Err(ClientError::UsernameTaken {
+                username: username.to_string(),
+            });
+        }
+        reg_resp.error_for_status().map_err(net)?;
 
         let sk_resp = http
             .get(format!("{server_url}/v1/server-key"))

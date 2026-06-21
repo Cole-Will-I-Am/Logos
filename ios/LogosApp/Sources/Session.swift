@@ -373,6 +373,8 @@ final class Session: ObservableObject {
             return .identityChanged(peer: peer)
         case .NotRegistered(let peer):
             return .network("@\(peer) isn’t on Logos yet — double-check the username.")
+        case .UsernameTaken(let username):
+            return .network("“\(username)” is already taken on this relay. Try a different username.")
         case .Network:
             return .network("Couldn’t reach the relay. We’ll keep this message ready to retry.")
         case .Client:
