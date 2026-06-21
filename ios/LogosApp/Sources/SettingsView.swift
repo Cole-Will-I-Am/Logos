@@ -11,6 +11,7 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: Space.lg) {
+                brandHeader
                 identityCard
                 networkSection
                 privacySection
@@ -27,6 +28,16 @@ struct SettingsView: View {
             relayMode = session.relayURL == Session.defaultRelay ? 0 : 1
             privateURL = relayMode == 1 ? session.relayURL : ""
         }
+    }
+
+    private var brandHeader: some View {
+        VStack(spacing: Space.xs) {
+            Image(systemName: "building.columns.fill")
+                .font(.system(size: 32)).foregroundStyle(LColor.gold)
+            Text("Logos").font(LFont.title).foregroundStyle(LColor.ink)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.bottom, Space.xs)
     }
 
     private var networkSection: some View {
@@ -140,7 +151,9 @@ struct SettingsView: View {
 
     private var myQRSheet: some View {
         NavigationStack {
-            VStack(spacing: Space.lg) {
+            VStack(spacing: Space.md) {
+                Image(systemName: "building.columns.fill")
+                    .font(.system(size: 22)).foregroundStyle(LColor.gold)
                 LAvatar(name: session.username ?? "?", size: 64)
                 Text(session.username.map { "@\($0)" } ?? "")
                     .font(LFont.title3).foregroundStyle(LColor.ink)
