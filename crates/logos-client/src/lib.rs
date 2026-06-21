@@ -284,12 +284,13 @@ impl Client {
             .error_for_status()
             .map_err(net)?;
 
-        let server_vk: ServerKeyResponse = http
+        let sk_resp = http
             .get(format!("{server_url}/v1/server-key"))
             .send()
-            .map_err(net)?
-            .json()
             .map_err(net)?;
+        let server_vk: ServerKeyResponse =
+            serde_json::from_slice(&read_body_with_limit(sk_resp, MAX_RESPONSE_BODY_BYTES)?)
+                .map_err(err)?;
 
         let store = Store {
             username: username.to_string(),
@@ -331,8 +332,14 @@ impl Client {
     /// password that was passed to `create`.
     pub fn load(path: impl AsRef<Path>, server_url: &str, password: Option<&str>) -> Result<Self> {
         let file_bytes = std::fs::read(path.as_ref()).map_err(err)?;
-        let plaintext = encrypted_store::decrypt_store(password, &file_bytes)
-            .map_err(|e| ClientError::other(format!("store decryption failed: {e}")))?;
+        // Format-detect so legacy/plaintext stores (every pre-encryption install) and
+        // no-password installs keep loading. Only an encrypted envelope is decrypted.
+        let plaintext = if encrypted_store::is_encrypted(&file_bytes) {
+            encrypted_store::decrypt_store(password, &file_bytes)
+                .map_err(|e| ClientError::other(format!("store decryption failed: {e}")))?
+        } else {
+            file_bytes
+        };
         let store: Store = serde_json::from_slice(&plaintext).map_err(err)?;
         if store.identity_secret.len() != 64 {
             return Err(ClientError::other(format!(
@@ -378,8 +385,14 @@ impl Client {
     /// same directory is atomic and leaves the old store intact on failure.
     fn save(&self) -> Result<()> {
         let plaintext = serde_json::to_vec_pretty(&self.store).map_err(err)?;
-        let file_bytes = encrypted_store::encrypt_store(self.password.as_deref(), &plaintext)
-            .map_err(|e| ClientError::other(format!("store encryption failed: {e}")))?;
+        // No password → legacy plaintext store (iOS relies on FileProtection); a real
+        // password → Argon2id + ChaCha20-Poly1305 envelope. `load` format-detects, so
+        // first save after setting a password migrates a plaintext store to encrypted.
+        let file_bytes = match self.password.as_deref() {
+            Some(pw) => encrypted_store::encrypt_store(Some(pw), &plaintext)
+                .map_err(|e| ClientError::other(format!("store encryption failed: {e}")))?,
+            None => plaintext,
+        };
         let tmp = self.path.with_extension("tmp");
         std::fs::write(&tmp, file_bytes).map_err(err)?;
         std::fs::rename(&tmp, &self.path).map_err(err)
@@ -398,16 +411,17 @@ impl Client {
             identity: identity.public(),
             sig: sig.to_vec(),
         };
-        let resp: CertResponse = self
+        let cert_resp = self
             .http
             .post(format!("{}/v1/cert", self.server_url))
             .json(&req)
             .send()
             .map_err(net)?
             .error_for_status()
-            .map_err(net)?
-            .json()
             .map_err(net)?;
+        let resp: CertResponse =
+            serde_json::from_slice(&read_body_with_limit(cert_resp, MAX_RESPONSE_BODY_BYTES)?)
+                .map_err(err)?;
         self.store.cert = Some(resp.certificate.clone());
         Ok(resp.certificate)
     }
@@ -432,7 +446,9 @@ impl Client {
             }
             Err(e) => return Err(net(e)),
         };
-        let resp: DirectoryResponse = http_resp.json().map_err(net)?;
+        let resp: DirectoryResponse =
+            serde_json::from_slice(&read_body_with_limit(http_resp, MAX_RESPONSE_BODY_BYTES)?)
+                .map_err(err)?;
         let bundle = resp.bundle;
         // F-02/F-03: TOFU-pin the recipient identity from the directory; refuse if
         // it changed from a previously seen value (possible relay key-substitution).

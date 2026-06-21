@@ -431,6 +431,8 @@ async fn post_mailbox(
     AxumPath(id): AxumPath<String>,
     Json(req): Json<PostEnvelope>,
 ) -> StatusCode {
+    // H1 fix: hold ONE lock across the rate-limit check AND the push, so concurrent
+    // bursts can't slip past the token bucket between two separate lock acquisitions.
     {
         let mut inner = state.0.lock().unwrap();
         let now = now();
@@ -440,25 +442,22 @@ async fn post_mailbox(
         {
             return StatusCode::TOO_MANY_REQUESTS;
         }
+        let ttl = inner.ttl_seconds;
+        let msg_id = inner.next_id;
+        let queue = inner.mailboxes.entry(id).or_default();
+        if queue.len() >= MAX_MAILBOX_MESSAGES {
+            // Mailbox full: refuse rather than grow without bound. The owner drains
+            // it via fetch + ACK.
+            return StatusCode::INSUFFICIENT_STORAGE;
+        }
+        queue.push(QueuedEnvelope {
+            id: msg_id,
+            arrived_at: now,
+            expires_at: now + ttl,
+            envelope: req.envelope,
+        });
+        inner.next_id += 1;
     }
-    let mut inner = state.0.lock().unwrap();
-    let ttl = inner.ttl_seconds;
-    let msg_id = inner.next_id;
-    let queue = inner.mailboxes.entry(id).or_default();
-    if queue.len() >= MAX_MAILBOX_MESSAGES {
-        // Mailbox full: refuse rather than grow without bound. The owner drains
-        // it via fetch + ACK.
-        return StatusCode::INSUFFICIENT_STORAGE;
-    }
-    let arrived = now();
-    queue.push(QueuedEnvelope {
-        id: msg_id,
-        arrived_at: arrived,
-        expires_at: arrived + ttl,
-        envelope: req.envelope,
-    });
-    inner.next_id += 1;
-    drop(inner);
     let _ = state.save_snapshot();
     StatusCode::OK
 }

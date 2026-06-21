@@ -111,7 +111,7 @@ pub fn initiate(
 
     // Post-quantum leg.
     let kem_pub = logos_identity::KemPublic::from_bytes(&bundle.kem_prekey.public)?;
-    let (kem_ct, ss) = kem_pub.encapsulate()?;
+    let (kem_ct, mut ss) = kem_pub.encapsulate()?;
 
     let mut ikm = Vec::new();
     ikm.extend_from_slice(&F);
@@ -132,6 +132,7 @@ pub fn initiate(
     dh1.zeroize();
     dh2.zeroize();
     dh3.zeroize();
+    ss.zeroize(); // H3: clear the ML-KEM shared secret after it's mixed into ikm
 
     Ok(InitiatorResult {
         root_key,
@@ -166,7 +167,7 @@ pub fn respond(
     let mut dh2 = dh(me.dh_secret(), &msg.ephemeral_pub); // IK_B x EK_A
     let mut dh3 = dh(&spk_secret, &msg.ephemeral_pub); // SPK_B x EK_A
 
-    let ss = kem_secret.decapsulate(&KemCiphertext(msg.kem_ciphertext.clone()))?;
+    let mut ss = kem_secret.decapsulate(&KemCiphertext(msg.kem_ciphertext.clone()))?;
 
     let mut ikm = Vec::new();
     ikm.extend_from_slice(&F);
@@ -187,6 +188,7 @@ pub fn respond(
     dh1.zeroize();
     dh2.zeroize();
     dh3.zeroize();
+    ss.zeroize(); // H3: clear the ML-KEM shared secret after it's mixed into ikm
 
     Ok(ResponderResult {
         root_key,

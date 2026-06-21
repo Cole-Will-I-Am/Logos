@@ -127,6 +127,15 @@ pub fn decrypt_store(
     Ok(plaintext)
 }
 
+/// True if `file_bytes` is an encrypted-store envelope (vs a legacy/plaintext Store
+/// JSON). Lets `Client::load` keep reading pre-encryption stores so existing installs
+/// aren't bricked by the format change.
+pub fn is_encrypted(file_bytes: &[u8]) -> bool {
+    serde_json::from_slice::<EncryptedStoreFile>(file_bytes)
+        .map(|f| f.version == STORE_VERSION)
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +161,15 @@ mod tests {
         let encrypted = encrypt_store(None, plaintext).unwrap();
         let decrypted = decrypt_store(None, &encrypted).unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn format_detection_distinguishes_plaintext_from_encrypted() {
+        // A legacy/plaintext Store JSON must NOT be seen as encrypted, so existing
+        // (pre-encryption) installs keep loading. Encrypted envelopes must be detected.
+        let legacy = br#"{"username":"alice","identity_secret":[1,2,3]}"#;
+        assert!(!is_encrypted(legacy));
+        let enc = encrypt_store(Some("pw"), b"{}").unwrap();
+        assert!(is_encrypted(&enc));
     }
 }
