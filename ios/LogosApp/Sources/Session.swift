@@ -183,6 +183,35 @@ final class Session: ObservableObject {
 
     func clearError() { lastError = nil }
 
+    // MARK: - Contact verification
+
+    /// Verification state for `peer` from the Rust core (safety number, verified,
+    /// change count). Run off-main so it never blocks the UI on the client mutex.
+    func contactSecurity(_ peer: String) async -> ContactSecurity? {
+        guard let client else { return nil }
+        return try? await runBlocking { client.contactSecurity(peer: peer) }
+    }
+
+    /// Mark `peer` verified after the user compared safety numbers out-of-band.
+    func markVerified(_ peer: String) async {
+        guard let client else { return }
+        do {
+            try await runBlocking { try client.markVerified(peer: peer) }
+            security[peer] = .verified
+            persist()
+        } catch { lastError = friendly(error) }
+    }
+
+    /// Recovery: accept that `peer` legitimately changed identity (e.g. reinstalled).
+    func resetPeerIdentity(_ peer: String) async {
+        guard let client else { return }
+        do {
+            try await runBlocking { try client.resetPeerIdentity(peer: peer) }
+            security[peer] = .encrypted
+            persist()
+        } catch { lastError = friendly(error) }
+    }
+
     // MARK: - Local chat history persistence
 
     /// On-disk snapshot of the UI-side chat history (the Rust store holds only the

@@ -128,8 +128,21 @@ struct Store {
     /// swapping a known contact's identity key.
     #[serde(default)]
     contacts: HashMap<String, IdentityPublic>,
+    /// Per-contact verification state. Kept separate from `contacts` so existing
+    /// stores (which only have `contacts`) deserialize unchanged.
+    #[serde(default)]
+    verifications: HashMap<String, Verification>,
     server_vk: Option<[u8; 32]>,
     cert: Option<SenderCertificate>,
+}
+
+/// Safety-number confirmation + identity-change tracking for one contact.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct Verification {
+    verified: bool,
+    verified_at: Option<u64>,
+    #[serde(default)]
+    changes: u32,
 }
 
 /// A received, decrypted message.
@@ -214,6 +227,7 @@ impl Client {
             one_time: otk_sec,
             sessions: HashMap::new(),
             contacts: HashMap::new(),
+            verifications: HashMap::new(),
             server_vk: Some(server_vk.verifying_key),
             cert: None,
         };
@@ -546,15 +560,71 @@ impl Client {
     /// refused (F-02/F-03). Real continuous verification needs key transparency.
     fn pin_identity(&mut self, username: &str, identity: &IdentityPublic) -> Result<()> {
         match self.store.contacts.get(username) {
-            Some(known) if known != identity => Err(ClientError::IdentityChanged {
-                peer: username.to_string(),
-            }),
+            Some(known) if known != identity => {
+                // Record the change and drop any prior verification, then refuse.
+                let v = self.store.verifications.entry(username.to_string()).or_default();
+                v.changes += 1;
+                v.verified = false;
+                v.verified_at = None;
+                let _ = self.save();
+                Err(ClientError::IdentityChanged {
+                    peer: username.to_string(),
+                })
+            }
             Some(_) => Ok(()),
             None => {
                 self.store.contacts.insert(username.to_string(), *identity);
                 Ok(())
             }
         }
+    }
+
+    // ---- contact verification (safety numbers + TOFU change tracking) ----
+
+    /// The human-comparable safety number for `peer`, or `None` if no identity is
+    /// pinned yet (no session has been established).
+    pub fn safety_number(&self, peer: &str) -> Option<String> {
+        let me = self.identity().public();
+        self.store
+            .contacts
+            .get(peer)
+            .map(|theirs| logos_identity::safety_number(&me, theirs))
+    }
+
+    pub fn is_verified(&self, peer: &str) -> bool {
+        self.store.verifications.get(peer).is_some_and(|v| v.verified)
+    }
+
+    pub fn verified_at(&self, peer: &str) -> Option<u64> {
+        self.store.verifications.get(peer).and_then(|v| v.verified_at)
+    }
+
+    pub fn key_changes(&self, peer: &str) -> u32 {
+        self.store.verifications.get(peer).map_or(0, |v| v.changes)
+    }
+
+    /// Mark `peer` verified (after the user compared safety numbers out-of-band).
+    pub fn mark_verified(&mut self, peer: &str) -> Result<()> {
+        if !self.store.contacts.contains_key(peer) {
+            return Err(ClientError::other("no pinned identity to verify yet"));
+        }
+        let v = self.store.verifications.entry(peer.to_string()).or_default();
+        v.verified = true;
+        v.verified_at = Some(now());
+        self.save()
+    }
+
+    /// Recovery: accept that `peer` legitimately changed identity (e.g. reinstalled).
+    /// Drops the pin + session so the next message re-pins the current identity, and
+    /// clears verification (the change stays counted in history).
+    pub fn reset_peer_identity(&mut self, peer: &str) -> Result<()> {
+        self.store.contacts.remove(peer);
+        self.store.sessions.remove(peer);
+        if let Some(v) = self.store.verifications.get_mut(peer) {
+            v.verified = false;
+            v.verified_at = None;
+        }
+        self.save()
     }
 
     fn establish_and_decrypt(

@@ -282,18 +282,19 @@ Small, well-scoped core additions that unlock the trust UX.
 // 1. ✅ LANDED — typed security outcome; replaced string-matching in Session.classify().
 enum LogosError { IdentityChanged{peer}, NotRegistered{peer}, Network{msg}, Client{msg} }
 
-// 2. TODO — identity verification — unlocks VerifyView for real.
-fn safety_number(&self, peer: &str) -> Result<String>;   // stable, groupable digits
-fn mark_verified(&self, peer: &str) -> Result<()>;
-fn is_verified(&self, peer: &str) -> bool;
+// 2. ✅ LANDED — identity verification (real safety numbers + verified state).
+fn contact_security(&self, peer) -> ContactSecurity {safety_number?, verified, verified_at?, key_changes}
+fn mark_verified(&self, peer) throws;       // after out-of-band compare
+fn reset_peer_identity(&self, peer) throws; // recovery: accept a legit reinstall
 
 // 3. TODO — richer incoming message — unlocks real timestamps & decrypt-failure bubbles.
 struct IncomingMessage { from, text, sent_at: u64, kind: Plain | UndecryptableNotice }
 ```
 
-(1) is done: the identity-changed interstitial is now reliable. With (2) `VerifyView`
-ships for real and the green "Verified" state becomes earnable; with (3) timestamps stop
-being "receipt time" and "can't decrypt" gets its own honest bubble.
+(1) and (2) are done: the identity-changed interstitial is reliable, and `VerifyView`
+now shows real safety numbers with an earnable "Verified" state + reinstall recovery.
+Still TODO: in-app **QR show/scan** (avoids reading 60 digits) and (3) richer
+`IncomingMessage` (real timestamps + an honest "can't decrypt" bubble).
 
 ---
 

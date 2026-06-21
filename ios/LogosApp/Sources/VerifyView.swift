@@ -1,31 +1,28 @@
 import SwiftUI
 
-/// Identity / safety-number screen.
-///
-/// FFI TODO: a real safety number needs the *identity fingerprint* of both parties
-/// (e.g. `client.safetyNumber(with: peer) -> String` + `markVerified(peer:)` /
-/// `isVerified(peer:)`). Those don't exist yet, so this screen renders the intended
-/// design and is honest that verification isn't wired up. It does NOT fabricate a
-/// number — showing a fake "verified" state would be the exact trust failure we’re
-/// trying to design out.
+/// Identity verification — real safety numbers from the Rust core.
+/// Compare the number out-of-band, mark verified, and recover from a legitimate
+/// identity change (e.g. the peer reinstalled). No QR yet — that's the next step.
 struct VerifyView: View {
     @EnvironmentObject var session: Session
     let peer: String
 
-    private var security: SessionSecurity { session.security(for: peer) }
-    private let wired = false   // flip to true once the fingerprint FFI lands
+    @State private var info: ContactSecurity?
+    @State private var loading = true
+    @State private var working = false
+
+    private var verified: Bool { info?.verified ?? false }
+    private var changed: Bool { (info?.keyChanges ?? 0) > 0 }
+    private var changeCountSuffix: String {
+        let n = info?.keyChanges ?? 0
+        return n > 1 ? " (\(n)×)" : ""
+    }
 
     var body: some View {
         ScrollView {
             VStack(spacing: Space.lg) {
                 header
-
-                if security == .identityChanged {
-                    LBanner(tone: .caution, icon: "exclamationmark.shield.fill",
-                            title: "This identity changed",
-                            message: "Re-verify \(peer) before trusting this conversation again.")
-                }
-
+                if changed && !verified { changeNotice }
                 safetyNumberCard
                 explanation
             }
@@ -35,18 +32,52 @@ struct VerifyView: View {
         .logosBackground(watermark: true)
         .navigationTitle("Verify \(peer)")
         .navigationBarTitleDisplayMode(.inline)
+        .task { await refresh() }
+    }
+
+    private func refresh() async {
+        info = await session.contactSecurity(peer)
+        loading = false
     }
 
     private var header: some View {
         VStack(spacing: Space.sm) {
             LAvatar(name: peer, size: 72)
             Text(peer).font(LFont.title3).foregroundStyle(LColor.ink)
-            switch security {
-            case .verified:        SecurityChip(level: .verified)
-            case .identityChanged: SecurityChip(level: .changed)
-            case .encrypted:       SecurityChip(level: .encrypted)
+            if verified {
+                VStack(spacing: 4) {
+                    SecurityChip(level: .verified)
+                    if let at = info?.verifiedAt {
+                        Text("Verified \(Date(timeIntervalSince1970: Double(at)).formatted(date: .abbreviated, time: .shortened))")
+                            .font(LFont.caption).foregroundStyle(LColor.inkTertiary)
+                    }
+                }
+            } else {
+                SecurityChip(level: changed ? .changed : .encrypted)
             }
         }
+    }
+
+    private var changeNotice: some View {
+        VStack(alignment: .leading, spacing: Space.sm) {
+            Label("\(peer)’s identity changed\(changeCountSuffix)", systemImage: "exclamationmark.shield.fill")
+                .font(LFont.headline).foregroundStyle(LColor.caution)
+            Text("If \(peer) reinstalled Logos or switched devices, this is expected — reset and re-verify. If you didn’t expect it, don’t send anything sensitive until you’ve confirmed it’s really them.")
+                .font(LFont.footnote).foregroundStyle(LColor.ink)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                Task { working = true; await session.resetPeerIdentity(peer); await refresh(); working = false }
+            } label: {
+                Text("They reinstalled — reset & re-verify").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.logosSecondary)
+            .disabled(working)
+        }
+        .padding(Space.md)
+        .background(LColor.caution.opacity(0.10))
+        .overlay(RoundedRectangle(cornerRadius: Radius.card, style: .continuous)
+            .strokeBorder(LColor.caution.opacity(0.4), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
     }
 
     private var safetyNumberCard: some View {
@@ -54,27 +85,31 @@ struct VerifyView: View {
             Text("SAFETY NUMBER").font(LFont.caption).fontWeight(.semibold)
                 .foregroundStyle(LColor.inkTertiary).tracking(0.6)
 
-            if wired {
-                // Real path: 12 grouped 5-digit blocks of the combined fingerprint.
-                Text("00000 00000 00000 00000\n00000 00000 00000 00000\n00000 00000 00000 00000")
+            if let sn = info?.safetyNumber {
+                Text(twoRows(sn))
                     .font(LFont.mono).foregroundStyle(LColor.ink)
                     .multilineTextAlignment(.center).lineSpacing(6)
-                HStack(spacing: Space.sm) {
-                    Button { Haptic.tap() } label: {
-                        Label("Scan QR", systemImage: "qrcode.viewfinder").frame(maxWidth: .infinity)
-                    }.buttonStyle(.logosSecondary)
-                    Button { Haptic.tap() } label: {
-                        Label("Mark verified", systemImage: "checkmark.shield").frame(maxWidth: .infinity)
-                    }.buttonStyle(.logosPrimary)
+                    .textSelection(.enabled)
+                if verified {
+                    Label("Verified", systemImage: "checkmark.shield.fill")
+                        .font(LFont.headline).foregroundStyle(LColor.verified)
+                } else {
+                    Button {
+                        Task { working = true; await session.markVerified(peer); await refresh(); working = false }
+                    } label: {
+                        Label("Mark as verified", systemImage: "checkmark.shield").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.logosPrimary)
+                    .disabled(working)
                 }
+            } else if loading {
+                ProgressView().padding(.vertical, Space.sm)
             } else {
-                VStack(spacing: Space.sm) {
+                VStack(spacing: Space.xs) {
                     Image(systemName: "number.square")
-                        .font(.system(size: 30, weight: .light)).foregroundStyle(LColor.inkTertiary)
-                    Text("Identity verification isn’t wired up in this build yet.")
-                        .font(LFont.subhead).foregroundStyle(LColor.inkSecondary)
-                        .multilineTextAlignment(.center)
-                    Text("Messages are still end-to-end encrypted and pinned to the first identity Logos saw for \(peer) (trust-on-first-use).")
+                        .font(.system(size: 28, weight: .light)).foregroundStyle(LColor.inkTertiary)
+                    Text("Send a message first").font(LFont.subhead).foregroundStyle(LColor.inkSecondary)
+                    Text("The safety number appears once Logos has set up a secure session with \(peer).")
                         .font(LFont.footnote).foregroundStyle(LColor.inkTertiary)
                         .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
                 }
@@ -93,5 +128,12 @@ struct VerifyView: View {
                 .font(LFont.footnote).foregroundStyle(LColor.goldText)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// "12345 12345 12345 12345 12345 12345" → two rows of three groups.
+    private func twoRows(_ sn: String) -> String {
+        let g = sn.split(separator: " ").map(String.init)
+        guard g.count == 6 else { return sn }
+        return g[0..<3].joined(separator: " ") + "\n" + g[3..<6].joined(separator: " ")
     }
 }

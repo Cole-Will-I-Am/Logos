@@ -52,6 +52,18 @@ pub struct IncomingMessage {
     pub text: String,
 }
 
+/// Per-contact verification state for the verify UI.
+#[derive(uniffi::Record)]
+pub struct ContactSecurity {
+    /// Human-comparable safety number, or `None` if no identity is pinned yet.
+    pub safety_number: Option<String>,
+    pub verified: bool,
+    /// Unix seconds when the user marked this contact verified.
+    pub verified_at: Option<u64>,
+    /// How many times this contact's identity has changed (TOFU).
+    pub key_changes: u32,
+}
+
 /// Stateful Logos client. Construct with `create` (new identity, registers with
 /// the relay) or `load` (existing on-disk store), then `send` / `recv`.
 #[derive(uniffi::Object)]
@@ -116,5 +128,34 @@ impl LogosClient {
                 text: m.text,
             })
             .collect())
+    }
+
+    /// Verification state for `peer` (safety number, verified flag, change count).
+    pub fn contact_security(&self, peer: String) -> ContactSecurity {
+        let c = self.inner.lock().expect("client lock");
+        ContactSecurity {
+            safety_number: c.safety_number(&peer),
+            verified: c.is_verified(&peer),
+            verified_at: c.verified_at(&peer),
+            key_changes: c.key_changes(&peer),
+        }
+    }
+
+    /// Mark `peer` as verified (after comparing safety numbers out-of-band).
+    pub fn mark_verified(&self, peer: String) -> Result<(), LogosError> {
+        self.inner
+            .lock()
+            .expect("client lock")
+            .mark_verified(&peer)?;
+        Ok(())
+    }
+
+    /// Recovery: accept a legitimate identity change (e.g. the peer reinstalled).
+    pub fn reset_peer_identity(&self, peer: String) -> Result<(), LogosError> {
+        self.inner
+            .lock()
+            .expect("client lock")
+            .reset_peer_identity(&peer)?;
+        Ok(())
     }
 }
