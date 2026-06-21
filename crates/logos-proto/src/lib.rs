@@ -174,33 +174,48 @@ pub struct GroupMeta {
     pub members: Vec<String>,
     pub admins: Vec<String>,
     pub created_unix: u64,
+    /// Monotonic membership/metadata version. An admin bumps it on every
+    /// add/remove/rename; members apply a `GroupUpdate` only if its epoch is newer,
+    /// so a replayed/stale update can't revert membership. `#[serde(default)]` keeps
+    /// pre-P4.0b stores (epoch 0) loading.
+    #[serde(default)]
+    pub epoch: u64,
 }
 
 /// A member's sender key as distributed to peers: the current chain key + iteration
-/// (so a later joiner can't read history) and the per-group Ed25519 signing public key.
+/// (so a later joiner can't read history), the per-group Ed25519 signing public key,
+/// and the key's `generation`. Generation increments on rekey (member removal); a
+/// recipient replaces a stored key only when it sees a strictly newer generation,
+/// which is how rekey-on-removal propagates without a stale distribution undoing it.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SenderKeyDist {
     pub chain_key: [u8; 32],
     pub iteration: u32,
     pub signing_pub: [u8; 32],
+    #[serde(default)]
+    pub generation: u32,
 }
 
 /// Control-plane message carried (encrypted) over a pairwise session to bootstrap and
 /// maintain a sender-key group.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum GroupControl {
-    /// Sent by the creator to each initial member: full group metadata + the creator's
-    /// sender key. A recipient that doesn't know the group creates it locally and
-    /// distributes its own sender key to the other members.
+    /// Sent by an admin to a (new) member: full group metadata + the sender's sender
+    /// key. A recipient that doesn't know the group creates it locally and distributes
+    /// its own sender key to the other members.
     Invite {
         group: GroupMeta,
         sender_key: SenderKeyDist,
     },
-    /// A member publishing their own sender key for an already-known group.
+    /// A member publishing their own (possibly rekeyed) sender key for a known group.
     SenderKey {
         group_id: [u8; 16],
         sender_key: SenderKeyDist,
     },
+    /// An admin-issued membership/metadata change (add, remove, rename). Carries the
+    /// new authoritative `GroupMeta`; recipients verify the sender is a current admin
+    /// and apply it only if its epoch is newer. A net removal triggers rekey-on-removal.
+    GroupUpdate { group: GroupMeta },
 }
 
 /// Domain-separated bytes a group message's per-message Ed25519 signature covers:

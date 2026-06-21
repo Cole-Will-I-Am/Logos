@@ -65,6 +65,12 @@ enum Command {
     GroupSend { group: String, message: Vec<String> },
     /// List the groups this client belongs to.
     Groups,
+    /// Add a member to a group (admin only).
+    GroupAdd { group: String, username: String },
+    /// Remove a member from a group (admin only); triggers rekey-on-removal.
+    GroupRemove { group: String, username: String },
+    /// Rename a group (admin only).
+    GroupRename { group: String, name: String },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -138,6 +144,21 @@ fn main() -> anyhow::Result<()> {
             for g in groups {
                 println!("{}  {}  [{}]", g.id, g.name, g.members.join(", "));
             }
+        }
+        Command::GroupAdd { group, username } => {
+            let mut client = Client::load(&cli.store, &cli.server, password.as_deref())?;
+            client.add_member(&group, &username)?;
+            println!("added {username} to group {group}");
+        }
+        Command::GroupRemove { group, username } => {
+            let mut client = Client::load(&cli.store, &cli.server, password.as_deref())?;
+            client.remove_member(&group, &username)?;
+            println!("removed {username} from group {group} (rekeyed)");
+        }
+        Command::GroupRename { group, name } => {
+            let mut client = Client::load(&cli.store, &cli.server, password.as_deref())?;
+            client.rename_group(&group, &name)?;
+            println!("renamed group {group} to '{name}'");
         }
     }
     Ok(())

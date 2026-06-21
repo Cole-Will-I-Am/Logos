@@ -141,3 +141,43 @@ Be explicit in-product that v1 is small-group-oriented.
   local v1).
 - Whether to require all members verified before sensitive use (suggest: warn, don't
   block, until key transparency).
+
+## Implemented status (P4.0a + P4.0b)
+
+P4.0a (static group: create/send/recv) and P4.0b (membership: add/remove with
+rekey-on-removal, admins, rename) are implemented in `logos-ratchet::senderkey`,
+`logos-proto` (`OuterMessage::{GroupCtrl,Group}`, `GroupControl`, `GroupMeta`,
+`SenderKeyDist`), and `logos-client` (`create_group`/`send_group`/`add_member`/
+`remove_member`/`rename_group`), with the M1 client-side prekey replenishment prereq.
+Bootstrap rides the pairwise Double Ratchet (E2EE + identity-bound), uses a
+**canonical-initiator rule** (`me < peer` initiates when no session exists; the other
+replies over the established session) to avoid simultaneous pairwise initiation, and an
+out-of-order pending-key buffer. Membership changes are admin-issued, **epoch**-versioned
+`GroupUpdate`s; sender keys carry a **generation** so a rekey REPLACES (rather than is
+ignored as a duplicate). Adversarially reviewed; the fixes from that review are applied.
+
+## Known limitations (sender-key v1) — accepted for now, fix later
+
+These are documented gaps the review surfaced that need larger mechanisms (out of P4.0b
+scope); none is a confidentiality break, but they affect availability/robustness:
+
+- **Simultaneous mutual session establishment.** If two members who have *no* prior 1:1
+  session both initiate to each other at the same instant (e.g. concurrent group creation
+  naming each other), each drops the other's handshake (the inbound-prekey replay guard).
+  This is the pre-existing 1:1 limitation surfaced by group bootstrap; the canonical-
+  initiator rule avoids it for member↔member distribution, but the creator's initial
+  invite can still collide. Real fix: session tie-breaking in the 1:1 layer.
+- **Best-effort fan-out, no delivery acks.** `send_group` posts one ciphertext per member;
+  a transient relay failure to one member loses that message for them (others still get
+  it; the sender chain has advanced). Needs a persistent per-member outbound retry queue.
+- **Quarantine cap vs deferred group setup.** A group message that arrives before its
+  sender key shares the 5-poll quarantine cap with never-decryptable envelopes; under
+  unusual delay it could be dropped before the key arrives. Needs age-based or
+  group-aware quarantine. (In practice keys arrive within a couple of polls.)
+- **Bootstrap-race early-message loss.** A member that sends a group message *before*
+  finishing sender-key distribution leaves not-yet-keyed members unable to read those
+  early messages (they receive the sender's current/advanced chain state). Distribute
+  before sending; storing iteration-0 forever would defeat at-rest forward secrecy.
+- **No transcript consistency / membership consistency.** A malicious relay can show
+  different members different message sets or withhold a `GroupUpdate` from some members
+  (already noted above). MLS (P4.1) addresses this. Removed members are not notified.

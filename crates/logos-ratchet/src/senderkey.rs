@@ -256,15 +256,28 @@ impl ReceiverChain {
             self.next_iteration += 1;
         }
         // Derive the key for `iteration` and try to decrypt before committing.
-        let (new_ck, mut mk) = kdf_ck(&ck);
+        let (mut new_ck, mut mk) = kdf_ck(&ck);
         ck.zeroize();
         let pt = aead_decrypt(&mk, ciphertext, &full_ad(iteration, ad));
         mk.zeroize();
-        let pt = pt?;
-        self.chain_key.zeroize();
-        self.chain_key = new_ck;
-        self.next_iteration = iteration + 1;
-        Ok(pt)
+        match pt {
+            Ok(pt) => {
+                self.chain_key.zeroize();
+                self.chain_key = new_ck;
+                // Fail closed at the u32 ceiling instead of overflowing (debug panic /
+                // release wrap-to-0). Staged-on-clone, so this just errors the message.
+                self.next_iteration = iteration
+                    .checked_add(1)
+                    .ok_or(SenderKeyError::TooManySkipped)?;
+                Ok(pt)
+            }
+            // Forged/corrupt ciphertext: discard the derived next chain key (it would
+            // otherwise linger uncleared on the stack) and leave state untouched.
+            Err(e) => {
+                new_ck.zeroize();
+                Err(e)
+            }
+        }
     }
 }
 

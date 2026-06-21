@@ -161,3 +161,102 @@ fn non_member_cannot_decrypt_group_message() {
         "non-member must not know the group"
     );
 }
+
+#[test]
+fn admin_can_add_a_member() {
+    let url = start_relay();
+    let mut alice = Client::create(tmp("add-alice"), &url, "alice_add", Some("pw")).unwrap();
+    let mut bob = Client::create(tmp("add-bob"), &url, "bob_add", Some("pw")).unwrap();
+    let mut carol = Client::create(tmp("add-carol"), &url, "carol_add", Some("pw")).unwrap();
+
+    let gid = alice.create_group("team", &["bob_add"]).unwrap();
+    settle(&mut [&mut alice, &mut bob], 2);
+
+    // Admin adds carol; bootstrap of the new member settles over a few rounds.
+    alice.add_member(&gid, "carol_add").unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol], 3);
+
+    for (who, c) in [("alice", &alice), ("bob", &bob), ("carol", &carol)] {
+        let mut m = c
+            .group_members(&gid)
+            .unwrap_or_else(|| panic!("{who} should know the group"));
+        m.sort();
+        assert_eq!(
+            m,
+            vec![
+                "alice_add".to_string(),
+                "bob_add".to_string(),
+                "carol_add".to_string()
+            ],
+            "{who} should see carol in the roster"
+        );
+    }
+
+    // The new member can send (original members receive) and receive.
+    carol.send_group(&gid, "carol here").unwrap();
+    let am = alice.recv().unwrap();
+    let bm = bob.recv().unwrap();
+    assert!(
+        am.iter()
+            .any(|m| m.from == "carol_add" && m.text == "carol here"),
+        "alice should receive the new member's message"
+    );
+    assert!(
+        bm.iter()
+            .any(|m| m.from == "carol_add" && m.text == "carol here"),
+        "bob should receive the new member's message"
+    );
+    alice.send_group(&gid, "welcome carol").unwrap();
+    let cm = carol.recv().unwrap();
+    assert!(
+        cm.iter()
+            .any(|m| m.from == "alice_add" && m.text == "welcome carol"),
+        "the new member should receive group messages"
+    );
+}
+
+#[test]
+fn admin_removes_member_and_rekeys() {
+    let url = start_relay();
+    let mut alice = Client::create(tmp("rm-alice"), &url, "alice_rm", Some("pw")).unwrap();
+    let mut bob = Client::create(tmp("rm-bob"), &url, "bob_rm", Some("pw")).unwrap();
+    let mut carol = Client::create(tmp("rm-carol"), &url, "carol_rm", Some("pw")).unwrap();
+
+    let gid = alice.create_group("team", &["bob_rm", "carol_rm"]).unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol], 3);
+
+    // While still a member, carol receives.
+    alice.send_group(&gid, "before removal").unwrap();
+    let cm = carol.recv().unwrap();
+    assert!(
+        cm.iter().any(|m| m.text == "before removal"),
+        "carol should receive messages while a member"
+    );
+    let _ = bob.recv().unwrap();
+
+    // Admin removes carol; rekey-on-removal propagates over a few rounds.
+    alice.remove_member(&gid, "carol_rm").unwrap();
+    settle(&mut [&mut alice, &mut bob], 3);
+
+    let mut am = alice.group_members(&gid).unwrap();
+    am.sort();
+    assert_eq!(
+        am,
+        vec!["alice_rm".to_string(), "bob_rm".to_string()],
+        "carol should be gone from the roster"
+    );
+
+    // A post-removal message reaches the remaining member but NOT the removed one:
+    // carol is dropped from the fan-out and the rekey means her old chain is useless.
+    alice.send_group(&gid, "after removal").unwrap();
+    let bm = bob.recv().unwrap();
+    assert!(
+        bm.iter().any(|m| m.text == "after removal"),
+        "remaining member should receive the post-removal message"
+    );
+    let cm2 = carol.recv().unwrap();
+    assert!(
+        !cm2.iter().any(|m| m.text == "after removal"),
+        "removed member must NOT receive post-removal messages"
+    );
+}

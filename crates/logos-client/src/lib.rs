@@ -14,7 +14,7 @@ pub mod encrypted_store;
 
 use logos_identity::{
     new_kem_prekey, new_one_time_prekey, new_signed_prekey, verify_ed25519, GroupSigningKey,
-    IdentityKeyPair, IdentityPublic, KemSecret,
+    IdentityKeyPair, IdentityPublic, KemPreKeyPublic, KemSecret, OneTimePreKeyPublic,
 };
 use logos_pqxdh::{initiate, respond, InitialMessage};
 use logos_proto::{
@@ -66,6 +66,10 @@ const MAX_GROUP_SIZE: usize = 32;
 /// Bound on buffered sender keys that arrived before their group invite, so an
 /// out-of-order bootstrap still completes — FIFO-evicted past this.
 const MAX_PENDING_GROUP_KEYS: usize = 256;
+
+/// Per-sender cap on buffered sender keys, so one peer flooding keys for unknown
+/// groups can't evict other peers' legitimately-pending keys from the global buffer.
+const MAX_PENDING_PER_SENDER: usize = 8;
 
 /// Errors from the client engine. The variants the UI must treat differently are
 /// **typed** (not stringly): `IdentityChanged` drives the high-friction identity
@@ -127,6 +131,24 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Bound and validate a peer-supplied group roster before acting on it: non-empty,
+/// at most `MAX_GROUP_SIZE` members, every member a valid + unique username, and
+/// every admin also a member. Without this an invite/update from any user could
+/// auto-enroll us into a huge, bogus group and amplify fan-out (forced pairwise
+/// sessions + sender-key distribution) to arbitrary attacker-named users.
+fn valid_group_meta(meta: &GroupMeta) -> bool {
+    if meta.members.is_empty() || meta.members.len() > MAX_GROUP_SIZE {
+        return false;
+    }
+    let mut seen = HashSet::new();
+    for m in &meta.members {
+        if validate_username(m).is_err() || !seen.insert(m.as_str()) {
+            return false;
+        }
+    }
+    meta.admins.iter().all(|a| meta.members.contains(a))
 }
 
 /// Stable fingerprint of an inbound initial (handshake) message, for replay
@@ -260,6 +282,14 @@ struct Store {
     next_one_time_id: u32,
     #[serde(default)]
     next_kem_id: u32,
+    /// Freshly minted prekey publics awaiting publication to the relay (M1). Their
+    /// secrets are already in the pools above; these are retried on every poll until
+    /// `POST /v1/replenish` succeeds, so a transient publish failure can't silently
+    /// wedge replenishment (and lose initial-message forward secrecy).
+    #[serde(default)]
+    pending_publish_otk: Vec<OneTimePreKeyPublic>,
+    #[serde(default)]
+    pending_publish_kem: Vec<KemPreKeyPublic>,
     /// E2EE group state (P4.0a), keyed by hex group id. `#[serde(default)]` so older
     /// stores (which have no groups) keep deserializing.
     #[serde(default)]
@@ -319,8 +349,13 @@ struct GroupRecord {
     meta: GroupMeta,
     my_signing_secret: [u8; 32],
     my_sender: senderkey::SenderChain,
+    /// Generation of our current sender key. Bumped on rekey-on-removal so peers
+    /// replace (rather than ignore) our rotated key.
+    #[serde(default)]
+    my_generation: u32,
     peers: HashMap<String, PeerSender>,
-    /// Members we've already sent our sender key to (avoids re-sending every poll).
+    /// Members we've already sent our current-generation sender key to (avoids
+    /// re-sending every poll). Cleared on rekey so we redistribute the new key.
     #[serde(default)]
     distributed: HashSet<String>,
 }
@@ -329,6 +364,9 @@ struct GroupRecord {
 struct PeerSender {
     signing_pub: [u8; 32],
     chain: senderkey::ReceiverChain,
+    /// Generation of the peer key we hold; we replace it only on a strictly newer one.
+    #[serde(default)]
+    generation: u32,
 }
 
 /// A sender key that arrived before its group's invite; applied once the invite
@@ -604,6 +642,8 @@ impl Client {
             quarantine: HashMap::new(),
             next_one_time_id: ONE_TIME_PREKEY_COUNT + 1,
             next_kem_id: KEM_PREKEY_COUNT + 1,
+            pending_publish_otk: Vec::new(),
+            pending_publish_kem: Vec::new(),
             groups: HashMap::new(),
             pending_group_keys: Vec::new(),
         };
@@ -778,23 +818,23 @@ impl Client {
         Ok(())
     }
 
-    /// Top the published one-time prekey pools back up when they run low, and
-    /// publish the fresh prekeys to the relay (M1). Best-effort: callers ignore a
-    /// network failure and retry on the next poll.
+    /// Top the published one-time prekey pools back up when they run low and publish
+    /// the fresh prekeys to the relay (M1). Best-effort per poll.
     ///
-    /// The new prekey **secrets are persisted before their publics are posted**, so
-    /// a crash mid-replenish can never leave the relay handing out a prekey whose
-    /// secret we don't hold (same durability rule as `send`).
+    /// Freshly minted secrets go into the local pools and their publics into the
+    /// `pending_publish_*` buffers; both are persisted, then POSTed. Crucially the
+    /// POST is retried on EVERY poll while the buffers are non-empty — decoupled from
+    /// the local-pool watermark — so a transient publish failure can't permanently
+    /// wedge replenishment (the local pool is already refilled, so a watermark-gated
+    /// retry would never re-fire), silently degrading initial-message forward secrecy.
+    /// Secrets are always persisted before being advertised, so the relay never hands
+    /// out a prekey whose secret we don't hold.
     fn maybe_replenish_prekeys(&mut self) -> Result<()> {
-        let otk_needed = self.store.one_time.len() <= OTK_LOW_WATERMARK;
-        let kem_needed = self.store.kem_one_time.len() <= KEM_LOW_WATERMARK;
-        if !otk_needed && !kem_needed {
-            return Ok(());
-        }
-        let identity = self.identity();
-
-        let mut otk_pub = Vec::new();
-        if otk_needed {
+        // Mint when the local pool is low AND nothing is already queued (don't pile up
+        // a second batch while one is still unpublished).
+        if self.store.one_time.len() <= OTK_LOW_WATERMARK
+            && self.store.pending_publish_otk.is_empty()
+        {
             // Lazily initialize the id counter for legacy stores (default 0) past any
             // existing id so a replenished prekey can't collide with a live one.
             if self.store.next_one_time_id == 0 {
@@ -813,16 +853,17 @@ impl Client {
                 let id = self.store.next_one_time_id;
                 self.store.next_one_time_id += 1;
                 let (p, s) = new_one_time_prekey(id);
-                otk_pub.push(p);
                 self.store.one_time.push(OtkSecret {
                     id,
                     secret: s.secret.to_bytes(),
                 });
+                self.store.pending_publish_otk.push(p);
             }
         }
-
-        let mut kem_pub = Vec::new();
-        if kem_needed {
+        if self.store.kem_one_time.len() <= KEM_LOW_WATERMARK
+            && self.store.pending_publish_kem.is_empty()
+        {
+            let identity = self.identity();
             if self.store.next_kem_id == 0 {
                 self.store.next_kem_id = self
                     .store
@@ -839,17 +880,23 @@ impl Client {
                 let id = self.store.next_kem_id;
                 self.store.next_kem_id += 1;
                 let (p, s) = new_kem_prekey(id, &identity);
-                kem_pub.push(p);
                 self.store.kem_one_time.push(KemSecretRec {
                     id,
                     secret: s.secret.to_bytes(),
                 });
+                self.store.pending_publish_kem.push(p);
             }
         }
 
-        // Persist the new secrets BEFORE publishing their publics (durability).
+        // Nothing waiting to publish — done.
+        if self.store.pending_publish_otk.is_empty() && self.store.pending_publish_kem.is_empty() {
+            return Ok(());
+        }
+
+        // Persist secrets + the pending publics BEFORE advertising them (durability).
         self.save()?;
 
+        let identity = self.identity();
         let sig = identity
             .sign(&replenish_signed_bytes(
                 &self.store.username,
@@ -859,8 +906,8 @@ impl Client {
         let req = ReplenishRequest {
             username: self.store.username.clone(),
             identity: identity.public(),
-            one_time_prekeys: otk_pub,
-            kem_prekeys: kem_pub,
+            one_time_prekeys: self.store.pending_publish_otk.clone(),
+            kem_prekeys: self.store.pending_publish_kem.clone(),
             sig,
         };
         self.http
@@ -870,7 +917,11 @@ impl Client {
             .map_err(net)?
             .error_for_status()
             .map_err(net)?;
-        Ok(())
+
+        // Published successfully — clear the pending buffers and persist.
+        self.store.pending_publish_otk.clear();
+        self.store.pending_publish_kem.clear();
+        self.save()
     }
 
     /// Encrypt and deliver a 1:1 `message` to `to`.
@@ -1193,6 +1244,12 @@ impl Client {
             v.verified = false;
             v.verified_at = None;
         }
+        // The pairwise session that carried our group sender keys to `peer` is gone;
+        // forget that we distributed to them so redistribution re-sends over the new
+        // session (otherwise the `distributed` mark would suppress it forever).
+        for rec in self.store.groups.values_mut() {
+            rec.distributed.remove(peer);
+        }
         self.save()
     }
 
@@ -1204,6 +1261,11 @@ impl Client {
     /// The contact must send again afterward to complete the re-handshake.
     pub fn reset_session(&mut self, peer: &str) -> Result<()> {
         self.store.sessions.remove(peer);
+        // Re-distribute our group sender keys to `peer` over the next session (the old
+        // one that carried them is gone).
+        for rec in self.store.groups.values_mut() {
+            rec.distributed.remove(peer);
+        }
         self.save()
     }
 
@@ -1268,6 +1330,7 @@ impl Client {
             chain_key: my_sender.chain_key(),
             iteration: my_sender.iteration(),
             signing_pub: my_signing.public_bytes(),
+            generation: 0,
         };
         let meta = GroupMeta {
             id: group_id,
@@ -1275,9 +1338,14 @@ impl Client {
             members: all_members,
             admins: vec![me.clone()],
             created_unix: now(),
+            epoch: 0,
         };
 
         // Invite every member (metadata + our sender key) over their pairwise session.
+        // NOTE (known limitation): the invite always initiates if there's no session;
+        // if a member concurrently initiates to us with no prior session, both sides
+        // drop each other's handshake (the 1:1 replay guard). See GROUP_CHAT_PLAN.md
+        // "Known limitations" — needs 1:1 session tie-breaking.
         for member in &roster {
             self.send_group_control(
                 member,
@@ -1296,6 +1364,7 @@ impl Client {
                 meta,
                 my_signing_secret: my_signing.secret_bytes(),
                 my_sender,
+                my_generation: 0,
                 peers: HashMap::new(),
                 distributed,
             },
@@ -1308,7 +1377,7 @@ impl Client {
     /// sender-key ciphertext is signed once and posted to each member's mailbox
     /// (per-member fan-out; the relay has no group concept in v1).
     pub fn send_group(&mut self, group_id_hex_str: &str, message: &str) -> Result<()> {
-        let (group_id, members, signing_secret) = {
+        let (group_id, members, mut signing_secret) = {
             let rec = self
                 .store
                 .groups
@@ -1335,6 +1404,7 @@ impl Client {
             rec.my_sender.encrypt(message.as_bytes(), &group_id)
         };
         let signing = GroupSigningKey::from_secret(&signing_secret);
+        signing_secret.zeroize(); // clear the transient copy of the per-group signing seed
         let signature = signing
             .sign(&group_message_signed_bytes(
                 &group_id,
@@ -1392,6 +1462,170 @@ impl Client {
             .map(|r| r.meta.members.clone())
     }
 
+    /// Add `username` to a group (admin only). Notifies existing members of the new
+    /// roster and invites the newcomer (who receives our current sender key, so they
+    /// can read from now on but not history). Other members distribute their keys to
+    /// the newcomer on their next poll. No rekey — additions don't compromise secrecy.
+    pub fn add_member(&mut self, group_id_hex_str: &str, username: &str) -> Result<()> {
+        let me = self.store.username.clone();
+        let (new_meta, invite_dist) = {
+            let rec = self
+                .store
+                .groups
+                .get(group_id_hex_str)
+                .ok_or_else(|| ClientError::other("unknown group"))?;
+            if !rec.meta.admins.contains(&me) {
+                return Err(ClientError::other("only an admin can add members"));
+            }
+            if validate_username(username).is_err() {
+                return Err(ClientError::InvalidUsername {
+                    reason: format!("'{username}' is not a valid username"),
+                });
+            }
+            if rec.meta.members.iter().any(|m| m == username) {
+                return Err(ClientError::other("already a member"));
+            }
+            if rec.meta.members.len() + 1 > MAX_GROUP_SIZE {
+                return Err(ClientError::other(format!(
+                    "group too large (max {MAX_GROUP_SIZE} members)"
+                )));
+            }
+            let mut meta = rec.meta.clone();
+            meta.members.push(username.to_string());
+            meta.epoch += 1;
+            let dist = SenderKeyDist {
+                chain_key: rec.my_sender.chain_key(),
+                iteration: rec.my_sender.iteration(),
+                signing_pub: GroupSigningKey::from_secret(&rec.my_signing_secret).public_bytes(),
+                generation: rec.my_generation,
+            };
+            (meta, dist)
+        };
+
+        // Tell existing members about the new roster (best-effort; retried by the admin).
+        let existing: Vec<String> = new_meta
+            .members
+            .iter()
+            .filter(|m| **m != me && *m != username)
+            .cloned()
+            .collect();
+        for m in &existing {
+            let _ = self.send_group_control(
+                m,
+                &GroupControl::GroupUpdate {
+                    group: new_meta.clone(),
+                },
+            );
+        }
+        // Invite the newcomer (full new roster + our current sender key).
+        self.send_group_control(
+            username,
+            &GroupControl::Invite {
+                group: new_meta.clone(),
+                sender_key: invite_dist,
+            },
+        )?;
+        if let Some(rec) = self.store.groups.get_mut(group_id_hex_str) {
+            rec.meta = new_meta;
+            // The invite carried our key, so the newcomer is already distributed-to.
+            rec.distributed.insert(username.to_string());
+        }
+        self.save()?;
+        Ok(())
+    }
+
+    /// Remove `username` from a group (admin only). Updates the roster, performs the
+    /// mandatory rekey-on-removal (every remaining member, including us, rotates their
+    /// sender key and redistributes), and notifies the remaining members. The removed
+    /// member is dropped from the fan-out and can no longer decrypt future messages.
+    pub fn remove_member(&mut self, group_id_hex_str: &str, username: &str) -> Result<()> {
+        let me = self.store.username.clone();
+        if username == me {
+            return Err(ClientError::other(
+                "cannot remove yourself (leaving a group is not yet supported)",
+            ));
+        }
+        let (new_meta, remaining) = {
+            let rec = self
+                .store
+                .groups
+                .get(group_id_hex_str)
+                .ok_or_else(|| ClientError::other("unknown group"))?;
+            if !rec.meta.admins.contains(&me) {
+                return Err(ClientError::other("only an admin can remove members"));
+            }
+            if !rec.meta.members.iter().any(|m| m == username) {
+                return Err(ClientError::other("not a member"));
+            }
+            let mut meta = rec.meta.clone();
+            meta.members.retain(|m| m != username);
+            meta.admins.retain(|a| a != username);
+            meta.epoch += 1;
+            let remaining: Vec<String> =
+                meta.members.iter().filter(|m| **m != me).cloned().collect();
+            (meta, remaining)
+        };
+
+        // Apply locally, drop the removed member, and rekey our sender key.
+        if let Some(rec) = self.store.groups.get_mut(group_id_hex_str) {
+            rec.meta = new_meta.clone();
+            rec.peers.remove(username);
+            rec.distributed.remove(username);
+        }
+        self.rekey_group_sender(group_id_hex_str);
+        self.save()?;
+
+        // Notify the remaining members (each rekeys on seeing the net removal), then
+        // push our freshly rekeyed key to them now.
+        for m in &remaining {
+            let _ = self.send_group_control(
+                m,
+                &GroupControl::GroupUpdate {
+                    group: new_meta.clone(),
+                },
+            );
+        }
+        self.redistribute_group_keys();
+        Ok(())
+    }
+
+    /// Rename a group (admin only). Name is not cryptographically bound in v1.
+    pub fn rename_group(&mut self, group_id_hex_str: &str, name: &str) -> Result<()> {
+        let me = self.store.username.clone();
+        let name = name.trim();
+        if name.is_empty() || name.len() > 128 {
+            return Err(ClientError::other("group name must be 1..=128 characters"));
+        }
+        let (new_meta, members) = {
+            let rec = self
+                .store
+                .groups
+                .get(group_id_hex_str)
+                .ok_or_else(|| ClientError::other("unknown group"))?;
+            if !rec.meta.admins.contains(&me) {
+                return Err(ClientError::other("only an admin can rename the group"));
+            }
+            let mut meta = rec.meta.clone();
+            meta.name = name.to_string();
+            meta.epoch += 1;
+            let members: Vec<String> = meta.members.iter().filter(|m| **m != me).cloned().collect();
+            (meta, members)
+        };
+        if let Some(rec) = self.store.groups.get_mut(group_id_hex_str) {
+            rec.meta = new_meta.clone();
+        }
+        self.save()?;
+        for m in &members {
+            let _ = self.send_group_control(
+                m,
+                &GroupControl::GroupUpdate {
+                    group: new_meta.clone(),
+                },
+            );
+        }
+        Ok(())
+    }
+
     /// Resolve a peer's identity for sealing — from the TOFU pin if present, else by
     /// establishing a session (which fetches + pins it from the directory).
     fn peer_identity_for(&mut self, user: &str) -> Result<IdentityPublic> {
@@ -1429,6 +1663,72 @@ impl Client {
                 let _ = self.save();
                 Ok(None)
             }
+            GroupControl::GroupUpdate { group } => self.handle_group_update(from, group),
+        }
+    }
+
+    /// Apply an admin-issued membership/metadata change (add / remove / rename). Only
+    /// a CURRENT admin's update is accepted, and only if its epoch is strictly newer
+    /// (replay/reorder protection). A net member removal triggers rekey-on-removal: we
+    /// rotate our own sender key and force redistribution to the remaining members so
+    /// the removed member cannot read future messages.
+    fn handle_group_update(&mut self, from: &str, new_meta: GroupMeta) -> Result<Option<Incoming>> {
+        let gid_hex = group_id_hex(&new_meta.id);
+        let me = self.store.username.clone();
+        // Bound + validate the new roster before applying (even from an admin).
+        if !valid_group_meta(&new_meta) {
+            return Ok(None);
+        }
+        let removed: Vec<String> = {
+            let rec = match self.store.groups.get_mut(&gid_hex) {
+                Some(r) => r,
+                None => return Ok(None), // unknown group — ignore
+            };
+            // Only a current admin may change the group, and only with a newer epoch.
+            if !rec.meta.admins.iter().any(|a| a == from) || new_meta.epoch <= rec.meta.epoch {
+                return Ok(None);
+            }
+            let old: HashSet<String> = rec.meta.members.iter().cloned().collect();
+            let new: HashSet<String> = new_meta.members.iter().cloned().collect();
+            let removed: Vec<String> = old.difference(&new).cloned().collect();
+            rec.meta = new_meta;
+            for r in &removed {
+                rec.peers.remove(r);
+                rec.distributed.remove(r);
+            }
+            removed
+        };
+
+        // If we were the one removed, drop the group entirely (we're cut off).
+        let removed_self = self
+            .store
+            .groups
+            .get(&gid_hex)
+            .map(|r| !r.meta.members.contains(&me))
+            .unwrap_or(false);
+        if removed_self {
+            self.store.groups.remove(&gid_hex);
+            self.save()?;
+            return Ok(None);
+        }
+
+        // Rekey-on-removal: rotate our sender key so the removed member can't decrypt
+        // future messages. Redistribution to the remaining members happens post-recv.
+        if !removed.is_empty() {
+            self.rekey_group_sender(&gid_hex);
+        }
+        self.save()?;
+        Ok(None)
+    }
+
+    /// Rotate our sender key for a group (rekey-on-removal): fresh chain, bumped
+    /// generation, and clear `distributed` so the new key is re-sent to every
+    /// remaining member (who will REPLACE the old one on the newer generation).
+    fn rekey_group_sender(&mut self, gid_hex: &str) {
+        if let Some(rec) = self.store.groups.get_mut(gid_hex) {
+            rec.my_sender = senderkey::SenderChain::generate();
+            rec.my_generation += 1;
+            rec.distributed.clear();
         }
     }
 
@@ -1441,9 +1741,13 @@ impl Client {
         group: GroupMeta,
         sender_key: SenderKeyDist,
     ) -> Result<Option<Incoming>> {
-        // The inviter must be a listed member (the cert already proved who `from` is),
+        // Bound + validate the (attacker-suppliable) roster before enrolling.
+        if !valid_group_meta(&group) {
+            return Ok(None);
+        }
+        // The inviter must be a listed ADMIN (the cert already proved who `from` is),
         // and we must be in the roster.
-        if !group.members.iter().any(|m| *m == from) {
+        if !group.admins.iter().any(|a| a == from) {
             return Ok(None);
         }
         let me = self.store.username.clone();
@@ -1459,47 +1763,54 @@ impl Client {
         }
 
         let my_signing = GroupSigningKey::generate();
-        let my_sender = senderkey::SenderChain::generate();
-        let mut peers = HashMap::new();
-        peers.insert(
-            from.to_string(),
-            PeerSender {
-                signing_pub: sender_key.signing_pub,
-                chain: senderkey::ReceiverChain::new(sender_key.chain_key, sender_key.iteration),
-            },
-        );
         let group_id = group.id;
         self.store.groups.insert(
             gid_hex.clone(),
             GroupRecord {
                 meta: group,
                 my_signing_secret: my_signing.secret_bytes(),
-                my_sender,
-                peers,
+                my_sender: senderkey::SenderChain::generate(),
+                my_generation: 0,
+                peers: HashMap::new(),
                 distributed: HashSet::new(),
             },
         );
-        // Apply any sender keys that arrived before this invite. Sending OUR key to the
-        // other members is left to the post-recv redistribution (which respects the
-        // canonical-initiator rule to avoid simultaneous session establishment).
+        // Record the inviter's sender key, then apply any sender keys that arrived
+        // before this invite. Sending OUR key to the other members is left to the
+        // post-recv redistribution (which respects the canonical-initiator rule).
+        self.insert_peer_sender(&gid_hex, from, &sender_key);
         self.drain_pending_keys(&gid_hex, &group_id);
         self.save()?;
         Ok(None)
     }
 
-    /// Record a peer's sender key for a known group (first one wins; a duplicate
-    /// distribution is ignored so it can't reset an already-advanced receive chain).
+    /// Record (or rekey) a peer's sender key for a known group. A first key is
+    /// inserted; a later one REPLACES the stored key only when its `generation` is
+    /// strictly newer (rekey-on-removal). An equal/older generation is a
+    /// duplicate/stale distribution and must NOT reset an already-advanced chain.
     fn insert_peer_sender(&mut self, gid_hex: &str, from: &str, dist: &SenderKeyDist) {
         if let Some(rec) = self.store.groups.get_mut(gid_hex) {
             if !rec.meta.members.iter().any(|m| *m == from) {
                 return;
             }
-            rec.peers
-                .entry(from.to_string())
-                .or_insert_with(|| PeerSender {
-                    signing_pub: dist.signing_pub,
-                    chain: senderkey::ReceiverChain::new(dist.chain_key, dist.iteration),
-                });
+            match rec.peers.get_mut(from) {
+                Some(existing) if dist.generation > existing.generation => {
+                    existing.signing_pub = dist.signing_pub;
+                    existing.chain = senderkey::ReceiverChain::new(dist.chain_key, dist.iteration);
+                    existing.generation = dist.generation;
+                }
+                Some(_) => {}
+                None => {
+                    rec.peers.insert(
+                        from.to_string(),
+                        PeerSender {
+                            signing_pub: dist.signing_pub,
+                            chain: senderkey::ReceiverChain::new(dist.chain_key, dist.iteration),
+                            generation: dist.generation,
+                        },
+                    );
+                }
+            }
         }
     }
 
@@ -1514,6 +1825,26 @@ impl Client {
             p.dist = dist;
             return;
         }
+        // Per-sender cap first: a flooding peer evicts only its OWN oldest entry, never
+        // another sender's buffered key.
+        if self
+            .store
+            .pending_group_keys
+            .iter()
+            .filter(|p| p.from == from)
+            .count()
+            >= MAX_PENDING_PER_SENDER
+        {
+            if let Some(pos) = self
+                .store
+                .pending_group_keys
+                .iter()
+                .position(|p| p.from == from)
+            {
+                self.store.pending_group_keys.remove(pos);
+            }
+        }
+        // Global backstop (bounds total memory across all senders).
         if self.store.pending_group_keys.len() >= MAX_PENDING_GROUP_KEYS {
             self.store.pending_group_keys.remove(0);
         }
@@ -1558,6 +1889,7 @@ impl Client {
                 chain_key: rec.my_sender.chain_key(),
                 iteration: rec.my_sender.iteration(),
                 signing_pub: GroupSigningKey::from_secret(&rec.my_signing_secret).public_bytes(),
+                generation: rec.my_generation,
             };
             for m in &rec.meta.members {
                 if *m == me || rec.distributed.contains(m) {
@@ -1596,14 +1928,17 @@ impl Client {
         signature: &[u8],
     ) -> Result<Option<Incoming>> {
         let gid_hex = group_id_hex(&group_id);
-        // Unknown group: keep for a later attempt (the invite may be in flight).
-        if !self.store.groups.contains_key(&gid_hex) {
-            return Err(ClientError::other("unknown group"));
-        }
+        // A structurally invalid signature (wrong length) can never become valid, so
+        // ACK-drop it regardless of group state — checked BEFORE the unknown-group
+        // quarantine path so malformed envelopes can't pin the mailbox for 5 polls.
         let sig_arr: [u8; 64] = match signature.try_into() {
             Ok(a) => a,
             Err(_) => return Ok(None),
         };
+        // Unknown group: keep for a later attempt (the invite may be in flight).
+        if !self.store.groups.contains_key(&gid_hex) {
+            return Err(ClientError::other("unknown group"));
+        }
         // No sender key yet: quarantine (distribution may still be in flight).
         let signing_pub = match self
             .store
