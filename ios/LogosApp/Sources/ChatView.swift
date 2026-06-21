@@ -23,6 +23,8 @@ struct ChatView: View {
         .animation(Motion.standard, value: session.online)
         .navigationTitle(peer)
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { session.setActive(peer) }
+        .onDisappear { session.setActive(nil) }
         .toolbar {
             ToolbarItem(placement: .principal) {
                 NavigationLink { VerifyView(peer: peer) } label: {

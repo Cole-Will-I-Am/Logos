@@ -37,6 +37,10 @@ final class Session: ObservableObject {
     @Published var conversations: [String] = []
     @Published var messages: [String: [ChatMessage]] = [:]
     @Published var security: [String: SessionSecurity] = [:]
+    // Inbox state (persisted with history).
+    @Published var pinned: Set<String> = []
+    @Published var archived: Set<String> = []
+    @Published var unread: [String: Int] = [:]
     @Published var relayURL: String
     @Published var lastError: String?
 
@@ -52,6 +56,7 @@ final class Session: ObservableObject {
     private var client: LogosClient?
     private let dir: URL
     private var pollTask: Task<Void, Never>?
+    private var activePeer: String?   // the open chat, so its incoming msgs don't count as unread
 
     // Store + history are scoped to the active relay: each relay (network) keeps its
     // own identity and chats, so switching networks is safe and reversible.
@@ -133,6 +138,42 @@ final class Session: ObservableObject {
         if !conversations.contains(peer) { conversations.append(peer) }
         if messages[peer] == nil { messages[peer] = [] }
         persist()
+    }
+
+    // MARK: - Inbox
+
+    /// The currently-open chat. Incoming messages for it aren't counted as unread.
+    func setActive(_ peer: String?) {
+        activePeer = peer
+        if let peer { markRead(peer) }
+    }
+    func markRead(_ peer: String) {
+        guard (unread[peer] ?? 0) != 0 else { return }
+        unread[peer] = 0
+        persist()
+    }
+    func togglePin(_ peer: String) {
+        if pinned.contains(peer) { pinned.remove(peer) } else { pinned.insert(peer) }
+        persist()
+    }
+    func toggleArchive(_ peer: String) {
+        if archived.contains(peer) { archived.remove(peer) } else { archived.insert(peer) }
+        persist()
+    }
+    /// Delete a conversation and its local history on THIS device only — the relay
+    /// and the other person are unaffected.
+    func deleteConversation(_ peer: String) {
+        conversations.removeAll { $0 == peer }
+        messages[peer] = nil
+        security[peer] = nil
+        unread[peer] = nil
+        pinned.remove(peer)
+        archived.remove(peer)
+        persist()
+    }
+    /// Most recent activity, for sorting the inbox.
+    func lastActivity(_ peer: String) -> Date {
+        messages[peer]?.last?.at ?? .distantPast
     }
 
     func send(to peer: String, text: String) {
@@ -223,6 +264,9 @@ final class Session: ObservableObject {
         var conversations: [String]
         var messages: [String: [ChatMessage]]
         var security: [String: SessionSecurity]
+        var pinned: [String]?
+        var archived: [String]?
+        var unread: [String: Int]?
     }
 
     private func loadHistory() {
@@ -232,6 +276,9 @@ final class Session: ObservableObject {
         else { return }
         conversations = snap.conversations
         security = snap.security
+        pinned = Set(snap.pinned ?? [])
+        archived = Set(snap.archived ?? [])
+        unread = snap.unread ?? [:]
         // A message still `.sending` at last save never confirmed delivery — surface
         // it as failed-but-retryable rather than a spinner that never resolves.
         messages = snap.messages.mapValues { arr in
@@ -243,7 +290,8 @@ final class Session: ObservableObject {
     }
 
     private func persist() {
-        let snap = HistorySnapshot(conversations: conversations, messages: messages, security: security)
+        let snap = HistorySnapshot(conversations: conversations, messages: messages, security: security,
+                                   pinned: Array(pinned), archived: Array(archived), unread: unread)
         do {
             let data = try JSONEncoder().encode(snap)
             var url = URL(fileURLWithPath: historyPath)
@@ -326,6 +374,7 @@ final class Session: ObservableObject {
                 startConversation(with: m.from)
                 messages[m.from, default: []].append(
                     ChatMessage(text: m.text, mine: false, status: .sent, at: Date()))
+                if m.from != activePeer { unread[m.from, default: 0] += 1 }
                 if security[m.from] == nil { security[m.from] = .encrypted }
             }
             if !incoming.isEmpty { persist() }
