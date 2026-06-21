@@ -14,6 +14,8 @@ name = "logos-server"
 path = "src/main.rs"
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
 logos-proto.workspace = true
 logos-identity.workspace = true
 logos-sealed.workspace = true

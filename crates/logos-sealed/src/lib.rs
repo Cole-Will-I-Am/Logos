@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
 use x25519_dalek::{PublicKey as X25519Public, StaticSecret as X25519Secret};
+use zeroize::Zeroize;
 
 #[derive(Debug, Error)]
 pub enum SealedError {
@@ -120,6 +121,8 @@ fn kdf(shared: &[u8; 32], eph_pub: &[u8; 32], recipient_pub: &[u8; 32]) -> ([u8;
     let mut nonce = [0u8; 12];
     key.copy_from_slice(&okm[..32]);
     nonce.copy_from_slice(&okm[32..]);
+    okm.zeroize();
+    salt.zeroize();
     (key, nonce)
 }
 
@@ -131,16 +134,16 @@ pub fn seal(
 ) -> Result<SealedEnvelope, SealedError> {
     let eph = X25519Secret::random_from_rng(rand::rngs::OsRng);
     let eph_pub = X25519Public::from(&eph).to_bytes();
-    let shared = eph
+    let mut shared = eph
         .diffie_hellman(&X25519Public::from(*recipient_identity_dh_pub))
         .to_bytes();
-    let (key, nonce) = kdf(&shared, &eph_pub, recipient_identity_dh_pub);
+    let (mut key, mut nonce) = kdf(&shared, &eph_pub, recipient_identity_dh_pub);
 
     let content = SealedContent {
         cert: cert.clone(),
         payload: payload.to_vec(),
     };
-    let plaintext = postcard::to_allocvec(&content).map_err(|_| SealedError::Malformed)?;
+    let mut plaintext = postcard::to_allocvec(&content).map_err(|_| SealedError::Malformed)?;
 
     let mut ad = Vec::with_capacity(64);
     ad.extend_from_slice(&eph_pub);
@@ -155,6 +158,11 @@ pub fn seal(
             },
         )
         .map_err(|_| SealedError::Decrypt)?;
+
+    key.zeroize();
+    nonce.zeroize();
+    plaintext.zeroize();
+    shared.zeroize();
 
     Ok(SealedEnvelope {
         ephemeral_pub: eph_pub,
@@ -171,16 +179,16 @@ pub fn unseal(
 ) -> Result<(SenderCertificate, Vec<u8>), SealedError> {
     let secret = X25519Secret::from(*recipient_identity_dh_priv);
     let recipient_pub = X25519Public::from(&secret).to_bytes();
-    let shared = secret
+    let mut shared = secret
         .diffie_hellman(&X25519Public::from(env.ephemeral_pub))
         .to_bytes();
-    let (key, nonce) = kdf(&shared, &env.ephemeral_pub, &recipient_pub);
+    let (mut key, mut nonce) = kdf(&shared, &env.ephemeral_pub, &recipient_pub);
 
     let mut ad = Vec::with_capacity(64);
     ad.extend_from_slice(&env.ephemeral_pub);
     ad.extend_from_slice(&recipient_pub);
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-    let plaintext = cipher
+    let mut plaintext = cipher
         .decrypt(
             Nonce::from_slice(&nonce),
             Payload {
@@ -190,8 +198,13 @@ pub fn unseal(
         )
         .map_err(|_| SealedError::Decrypt)?;
 
+    key.zeroize();
+    nonce.zeroize();
+    shared.zeroize();
+
     let content: SealedContent =
         postcard::from_bytes(&plaintext).map_err(|_| SealedError::Malformed)?;
+    plaintext.zeroize();
     verify_certificate(&content.cert, server_verifying, now_unix)?;
     Ok((content.cert, content.payload))
 }

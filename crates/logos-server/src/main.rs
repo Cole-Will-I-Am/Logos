@@ -8,6 +8,7 @@ async fn main() -> std::io::Result<()> {
         .parse()
         .expect("valid LOGOS_ADDR");
     let key_path = std::env::var("LOGOS_KEY").unwrap_or_else(|_| "logos-server-key".to_string());
+    let data_dir = std::env::var("LOGOS_DATA").unwrap_or_else(|_| "logos-server-data".to_string());
     tracing::info!("Logos relay listening on {addr} (EXPERIMENTAL — UNAUDITED)");
-    logos_server::run(addr, &key_path).await
+    logos_server::run(addr, &key_path, &data_dir).await
 }

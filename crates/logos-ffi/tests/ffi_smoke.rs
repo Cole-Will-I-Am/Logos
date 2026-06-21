@@ -35,8 +35,20 @@ fn tmp(name: &str) -> String {
 fn ffi_client_round_trip() {
     let url = start_relay();
 
-    let alice = LogosClient::create(tmp("alice"), url.clone(), "alice".into()).unwrap();
-    let bob = LogosClient::create(tmp("bob"), url.clone(), "bob".into()).unwrap();
+    let alice = LogosClient::create(
+        tmp("alice"),
+        url.clone(),
+        "alice".into(),
+        Some("test-password".into()),
+    )
+    .unwrap();
+    let bob = LogosClient::create(
+        tmp("bob"),
+        url.clone(),
+        "bob".into(),
+        Some("test-password".into()),
+    )
+    .unwrap();
     assert_eq!(alice.username(), "alice");
 
     alice.send("bob".into(), "hello from ffi".into()).unwrap();

@@ -39,16 +39,16 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Register { username } => {
-            let client = Client::create(&cli.store, &cli.server, &username)?;
+            let client = Client::create(&cli.store, &cli.server, &username, Some("test-password"))?;
             println!("registered '{}' (store: {})", client.username(), cli.store);
         }
         Command::Send { to, message } => {
-            let mut client = Client::load(&cli.store, &cli.server)?;
+            let mut client = Client::load(&cli.store, &cli.server, Some("test-password"))?;
             client.send(&to, &message.join(" "))?;
             println!("sent to {to}");
         }
         Command::Recv => {
-            let mut client = Client::load(&cli.store, &cli.server)?;
+            let mut client = Client::load(&cli.store, &cli.server, Some("test-password"))?;
             let msgs = client.recv()?;
             if msgs.is_empty() {
                 println!("(no new messages)");
@@ -58,7 +58,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Whoami => {
-            let client = Client::load(&cli.store, &cli.server)?;
+            let client = Client::load(&cli.store, &cli.server, Some("test-password"))?;
             println!("{}", client.username());
         }
     }

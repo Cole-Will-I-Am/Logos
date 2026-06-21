@@ -9,6 +9,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[doc(hidden)]
+pub mod encrypted_store;
+
 use logos_identity::{
     new_kem_prekey, new_one_time_prekey, new_signed_prekey, IdentityKeyPair, IdentityPublic,
     KemSecret,
@@ -22,11 +25,21 @@ use logos_proto::{
 use logos_ratchet::RatchetState;
 use logos_sealed::{seal, unseal, SealedEnvelope, SenderCertificate};
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const ONE_TIME_PREKEY_COUNT: u32 = 20;
 const KEM_PREKEY_COUNT: u32 = 10;
 /// Reserved id for the reusable last-resort ML-KEM prekey (one-time ids start at 1).
 const LAST_RESORT_KEM_ID: u32 = 0;
+
+/// Hard ceiling on any relay response body the client will deserialize. A
+/// malicious/compromised relay cannot force unbounded buffering before the
+/// caller sees a parse failure (F-08 sibling).
+const MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Max envelopes returned in a single `/v1/fetch` call. Extra envelopes remain
+/// on the server and are fetched on the next poll.
+const MAX_FETCH_ENVELOPES: usize = 1_000;
 
 /// Errors from the client engine. The variants the UI must treat differently are
 /// **typed** (not stringly): `IdentityChanged` drives the high-friction identity
@@ -87,27 +100,56 @@ fn http_client() -> reqwest::blocking::Client {
         .unwrap_or_else(|_| reqwest::blocking::Client::new())
 }
 
-#[derive(Serialize, Deserialize)]
+/// Read a relay response with a hard byte cap. Fails closed: if the server
+/// advertises a body larger than `MAX_RESPONSE_BODY_BYTES`, or if the streamed
+/// body exceeds it, we return a `Network` error instead of buffering forever.
+fn read_body_with_limit(resp: reqwest::blocking::Response, limit: usize) -> Result<Vec<u8>> {
+    if let Some(len) = resp.content_length() {
+        if len as usize > limit {
+            return Err(ClientError::Network(format!(
+                "response body too large (advertised {len} > {limit})"
+            )));
+        }
+    }
+    use std::io::Read;
+    let mut out = Vec::with_capacity(4096);
+    let mut take = resp.take(limit as u64 + 1);
+    take.read_to_end(&mut out)
+        .map_err(|e| ClientError::Network(e.to_string()))?;
+    if out.len() > limit {
+        return Err(ClientError::Network(format!(
+            "response body exceeded {limit} byte cap"
+        )));
+    }
+    Ok(out)
+}
+
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct OtkSecret {
+    #[zeroize(skip)]
     id: u32,
     secret: [u8; 32],
 }
 
 /// A stored ML-KEM prekey secret (one-time or last-resort) (F-05).
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct KemSecretRec {
+    #[zeroize(skip)]
     id: u32,
     secret: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct Session {
     ratchet: RatchetState,
     /// Full peer identity (`ed` + `dh`). The `dh` half seals envelopes to the
     /// peer; the full identity derives the peer's mailbox id (which must bind the
     /// Ed25519 key — see `logos_proto::mailbox_id`).
+    #[zeroize(skip)]
     peer_identity: IdentityPublic,
+    #[zeroize(skip)]
     sent_initial: bool,
+    #[zeroize(skip)]
     pending_initial: Option<InitialMessage>,
 }
 
@@ -136,6 +178,25 @@ struct Store {
     cert: Option<SenderCertificate>,
 }
 
+impl Drop for Store {
+    fn drop(&mut self) {
+        // Zeroize secret material before the store is freed. Public metadata
+        // (username, ids, pinned identities, certificates) is intentionally
+        // skipped — it carries no key material.
+        self.identity_secret.zeroize();
+        self.signed_prekey_secret.zeroize();
+        for rec in &mut self.kem_one_time {
+            rec.zeroize();
+        }
+        self.kem_last_resort.zeroize();
+        for rec in &mut self.one_time {
+            rec.zeroize();
+        }
+        for session in self.sessions.values_mut() {
+            session.ratchet.zeroize();
+        }
+    }
+}
 /// Safety-number confirmation + identity-change tracking for one contact.
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct Verification {
@@ -156,11 +217,24 @@ pub struct Client {
     path: PathBuf,
     server_url: String,
     http: reqwest::blocking::Client,
+    /// Store encryption password (Argon2id). `None` is allowed only for
+    /// tests/dev.
+    password: Option<String>,
 }
 
 impl Client {
     /// Create a new identity, register it with the relay, and persist to `path`.
-    pub fn create(path: impl AsRef<Path>, server_url: &str, username: &str) -> Result<Self> {
+    /// Create a new identity, register it with the relay, and persist to `path`.
+    ///
+    /// `password` is stretched with Argon2id to encrypt the store at rest. A
+    /// `None` password is accepted for tests/dev but must not be used for real
+    /// accounts.
+    pub fn create(
+        path: impl AsRef<Path>,
+        server_url: &str,
+        username: &str,
+        password: Option<&str>,
+    ) -> Result<Self> {
         let identity = IdentityKeyPair::generate();
         let (spk_pub, spk_sec) = new_signed_prekey(1, &identity);
         let mut otk_pub = Vec::new();
@@ -210,12 +284,13 @@ impl Client {
             .error_for_status()
             .map_err(net)?;
 
-        let server_vk: ServerKeyResponse = http
+        let sk_resp = http
             .get(format!("{server_url}/v1/server-key"))
             .send()
-            .map_err(net)?
-            .json()
             .map_err(net)?;
+        let server_vk: ServerKeyResponse =
+            serde_json::from_slice(&read_body_with_limit(sk_resp, MAX_RESPONSE_BODY_BYTES)?)
+                .map_err(err)?;
 
         let store = Store {
             username: username.to_string(),
@@ -236,6 +311,7 @@ impl Client {
             path: path.as_ref().to_path_buf(),
             server_url: server_url.to_string(),
             http,
+            password: password.map(|p| p.to_string()),
         };
         // F-06: acquire the sealed-sender certificate at registration time, so its
         // issuance isn't correlated by the relay with a later send.
@@ -250,9 +326,21 @@ impl Client {
     /// 64-byte identity secret) so a corrupt/tampered store surfaces a recoverable
     /// error here rather than panicking on first use (which, across the iOS FFI
     /// boundary, would crash the app).
-    pub fn load(path: impl AsRef<Path>, server_url: &str) -> Result<Self> {
-        let bytes = std::fs::read(path.as_ref()).map_err(err)?;
-        let store: Store = serde_json::from_slice(&bytes).map_err(err)?;
+    /// Load an existing client from `path`.
+    ///
+    /// Decrypts the Argon2id-wrapped store with `password`. Use the same
+    /// password that was passed to `create`.
+    pub fn load(path: impl AsRef<Path>, server_url: &str, password: Option<&str>) -> Result<Self> {
+        let file_bytes = std::fs::read(path.as_ref()).map_err(err)?;
+        // Format-detect so legacy/plaintext stores (every pre-encryption install) and
+        // no-password installs keep loading. Only an encrypted envelope is decrypted.
+        let plaintext = if encrypted_store::is_encrypted(&file_bytes) {
+            encrypted_store::decrypt_store(password, &file_bytes)
+                .map_err(|e| ClientError::other(format!("store decryption failed: {e}")))?
+        } else {
+            file_bytes
+        };
+        let store: Store = serde_json::from_slice(&plaintext).map_err(err)?;
         if store.identity_secret.len() != 64 {
             return Err(ClientError::other(format!(
                 "corrupt store: identity_secret is {} bytes (expected 64)",
@@ -264,6 +352,7 @@ impl Client {
             path: path.as_ref().to_path_buf(),
             server_url: server_url.to_string(),
             http: http_client(),
+            password: password.map(|p| p.to_string()),
         })
     }
 
@@ -295,9 +384,17 @@ impl Client {
     /// corrupt the entire store (identity + sessions + prekeys); rename on the
     /// same directory is atomic and leaves the old store intact on failure.
     fn save(&self) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(&self.store).map_err(err)?;
+        let plaintext = serde_json::to_vec_pretty(&self.store).map_err(err)?;
+        // No password → legacy plaintext store (iOS relies on FileProtection); a real
+        // password → Argon2id + ChaCha20-Poly1305 envelope. `load` format-detects, so
+        // first save after setting a password migrates a plaintext store to encrypted.
+        let file_bytes = match self.password.as_deref() {
+            Some(pw) => encrypted_store::encrypt_store(Some(pw), &plaintext)
+                .map_err(|e| ClientError::other(format!("store encryption failed: {e}")))?,
+            None => plaintext,
+        };
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, bytes).map_err(err)?;
+        std::fs::write(&tmp, file_bytes).map_err(err)?;
         std::fs::rename(&tmp, &self.path).map_err(err)
     }
 
@@ -314,16 +411,17 @@ impl Client {
             identity: identity.public(),
             sig: sig.to_vec(),
         };
-        let resp: CertResponse = self
+        let cert_resp = self
             .http
             .post(format!("{}/v1/cert", self.server_url))
             .json(&req)
             .send()
             .map_err(net)?
             .error_for_status()
-            .map_err(net)?
-            .json()
             .map_err(net)?;
+        let resp: CertResponse =
+            serde_json::from_slice(&read_body_with_limit(cert_resp, MAX_RESPONSE_BODY_BYTES)?)
+                .map_err(err)?;
         self.store.cert = Some(resp.certificate.clone());
         Ok(resp.certificate)
     }
@@ -348,7 +446,9 @@ impl Client {
             }
             Err(e) => return Err(net(e)),
         };
-        let resp: DirectoryResponse = http_resp.json().map_err(net)?;
+        let resp: DirectoryResponse =
+            serde_json::from_slice(&read_body_with_limit(http_resp, MAX_RESPONSE_BODY_BYTES)?)
+                .map_err(err)?;
         let bundle = resp.bundle;
         // F-02/F-03: TOFU-pin the recipient identity from the directory; refuse if
         // it changed from a previously seen value (possible relay key-substitution).
@@ -361,7 +461,7 @@ impl Client {
                 ratchet,
                 peer_identity: bundle.identity,
                 sent_initial: false,
-                pending_initial: Some(init.initial_message),
+                pending_initial: Some(init.initial_message.clone()),
             },
         );
         Ok(())
@@ -431,7 +531,7 @@ impl Client {
         let identity = self.identity();
         let id_pub = identity.public();
         let fetch_sig = identity.sign(&fetch_signed_bytes(&id_pub)).to_vec();
-        let resp: FetchResponse = self
+        let fetch_resp = self
             .http
             .post(format!("{}/v1/fetch", self.server_url))
             .json(&FetchRequest {
@@ -441,9 +541,10 @@ impl Client {
             .send()
             .map_err(net)?
             .error_for_status()
-            .map_err(net)?
-            .json()
             .map_err(net)?;
+        let resp_bytes = read_body_with_limit(fetch_resp, MAX_RESPONSE_BODY_BYTES)?;
+        let mut resp: FetchResponse = serde_json::from_slice(&resp_bytes).map_err(err)?;
+        resp.envelopes.truncate(MAX_FETCH_ENVELOPES);
 
         let server_vk = self
             .store

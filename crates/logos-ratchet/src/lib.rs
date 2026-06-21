@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
 use x25519_dalek::{PublicKey as X25519Public, StaticSecret as X25519Secret};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -62,24 +62,35 @@ pub struct RatchetMessage {
     pub ciphertext: Vec<u8>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct Skipped {
+    #[zeroize(skip)]
     dh: [u8; 32],
+    #[zeroize(skip)]
     n: u32,
     mk: [u8; 32],
 }
 
 /// Serializable Double Ratchet state (persisted in the encrypted client store).
-#[derive(Clone, Serialize, Deserialize)]
+///
+/// Dropping a `RatchetState` zeroizes the root key, DH secrets, and chain keys
+/// via [`ZeroizeOnDrop`]. Public ratchet public keys and counters are skipped so
+/// they remain usable for serialised wire/storage formats.
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct RatchetState {
     rk: [u8; 32],
     dhs_priv: [u8; 32],
+    #[zeroize(skip)]
     dhs_pub: [u8; 32],
+    #[zeroize(skip)]
     dhr: Option<[u8; 32]>,
     cks: Option<[u8; 32]>,
     ckr: Option<[u8; 32]>,
+    #[zeroize(skip)]
     ns: u32,
+    #[zeroize(skip)]
     nr: u32,
+    #[zeroize(skip)]
     pn: u32,
     skipped: Vec<Skipped>,
 }
@@ -93,6 +104,7 @@ fn kdf_rk(rk: &[u8; 32], dh_out: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
     let mut ck = [0u8; 32];
     new_rk.copy_from_slice(&okm[..32]);
     ck.copy_from_slice(&okm[32..]);
+    okm.zeroize();
     (new_rk, ck)
 }
 
@@ -121,13 +133,14 @@ fn mk_to_aead(mk: &[u8; 32]) -> ([u8; 32], [u8; 12]) {
     let mut nonce = [0u8; 12];
     key.copy_from_slice(&okm[..32]);
     nonce.copy_from_slice(&okm[32..]);
+    okm.zeroize();
     (key, nonce)
 }
 
 fn aead_encrypt(mk: &[u8; 32], plaintext: &[u8], ad: &[u8]) -> Vec<u8> {
-    let (key, nonce) = mk_to_aead(mk);
+    let (mut key, mut nonce) = mk_to_aead(mk);
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-    cipher
+    let ct = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
@@ -135,13 +148,16 @@ fn aead_encrypt(mk: &[u8; 32], plaintext: &[u8], ad: &[u8]) -> Vec<u8> {
                 aad: ad,
             },
         )
-        .expect("aead encrypt")
+        .expect("aead encrypt");
+    key.zeroize();
+    nonce.zeroize();
+    ct
 }
 
 fn aead_decrypt(mk: &[u8; 32], ciphertext: &[u8], ad: &[u8]) -> Result<Vec<u8>, RatchetError> {
-    let (key, nonce) = mk_to_aead(mk);
+    let (mut key, mut nonce) = mk_to_aead(mk);
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-    cipher
+    let pt = cipher
         .decrypt(
             Nonce::from_slice(&nonce),
             Payload {
@@ -149,7 +165,10 @@ fn aead_decrypt(mk: &[u8; 32], ciphertext: &[u8], ad: &[u8]) -> Result<Vec<u8>, 
                 aad: ad,
             },
         )
-        .map_err(|_| RatchetError::Decrypt)
+        .map_err(|_| RatchetError::Decrypt);
+    key.zeroize();
+    nonce.zeroize();
+    pt
 }
 
 fn dh(priv_bytes: &[u8; 32], pub_bytes: &[u8; 32]) -> [u8; 32] {
@@ -203,7 +222,7 @@ impl RatchetState {
         let ck = self
             .cks
             .expect("sender chain must be initialized for the initiator's first send");
-        let (new_ck, mk) = kdf_ck(&ck);
+        let (new_ck, mut mk) = kdf_ck(&ck);
         self.cks = Some(new_ck);
         let header = Header {
             dh: self.dhs_pub,
@@ -214,6 +233,7 @@ impl RatchetState {
         let mut ad = associated_data.to_vec();
         ad.extend_from_slice(&header.as_ad());
         let ciphertext = aead_encrypt(&mk, plaintext, &ad);
+        mk.zeroize();
         RatchetMessage { header, ciphertext }
     }
 
@@ -266,10 +286,11 @@ impl RatchetState {
             .iter()
             .position(|s| s.dh == msg.header.dh && s.n == msg.header.n)
         {
-            let mk = self.skipped[idx].mk;
+            let mut mk = self.skipped[idx].mk;
             let mut ad = associated_data.to_vec();
             ad.extend_from_slice(&msg.header.as_ad());
             let pt = aead_decrypt(&mk, &msg.ciphertext, &ad)?;
+            mk.zeroize();
             self.skipped.remove(idx);
             return Ok(Some(pt));
         }

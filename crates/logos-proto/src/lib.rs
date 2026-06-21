@@ -92,6 +92,24 @@ pub struct StoredEnvelope {
     pub envelope: SealedEnvelope,
 }
 
+/// POST /v1/replenish — publish fresh one-time prekeys for an existing identity.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ReplenishRequest {
+    pub username: String,
+    pub identity: IdentityPublic,
+    pub one_time_prekeys: Vec<OneTimePreKeyPublic>,
+    pub kem_prekeys: Vec<KemPreKeyPublic>,
+    pub sig: Vec<u8>,
+}
+
+pub fn replenish_signed_bytes(username: &str, identity: &IdentityPublic) -> Vec<u8> {
+    let mut v = b"LogosReplenishv1".to_vec();
+    v.extend_from_slice(username.as_bytes());
+    v.push(0);
+    v.extend_from_slice(&identity.encode());
+    v
+}
+
 /// POST /v1/fetch — authenticated mailbox read (does NOT delete). The server
 /// derives the mailbox from the proven identity, so only the identity-key holder
 /// can read it (F-04). `sig` is over `fetch_signed_bytes`.

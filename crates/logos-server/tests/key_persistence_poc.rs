@@ -22,7 +22,10 @@ fn poc_v5_invalid_key_file_is_silently_overwritten() {
 
     // Booting the relay against a present-but-invalid key file must FAIL rather
     // than silently overwrite it (which would rotate the signing key).
-    let result = logos_server::new_state_at(path.to_str().unwrap());
+    let result = logos_server::new_state_at(
+        path.to_str().unwrap(),
+        std::env::temp_dir().to_str().unwrap(),
+    );
     assert!(
         result.is_err(),
         "present-but-invalid key file should be a fatal startup error, not a silent rotation"
@@ -38,7 +41,11 @@ fn poc_v5_invalid_key_file_is_silently_overwritten() {
 fn poc_v5_valid_key_file_is_preserved() {
     let path = tmp("valid-key");
     std::fs::write(&path, [0x07; 32]).unwrap();
-    assert!(logos_server::new_state_at(path.to_str().unwrap()).is_ok());
+    assert!(logos_server::new_state_at(
+        path.to_str().unwrap(),
+        std::env::temp_dir().to_str().unwrap()
+    )
+    .is_ok());
     // A valid 32-byte key is kept across boots.
     assert_eq!(std::fs::read(&path).unwrap(), vec![0x07; 32]);
 }
@@ -47,11 +54,19 @@ fn poc_v5_valid_key_file_is_preserved() {
 fn poc_v5_missing_key_file_is_generated_once() {
     let path = tmp("fresh-key");
     let _ = std::fs::remove_file(&path);
-    assert!(logos_server::new_state_at(path.to_str().unwrap()).is_ok());
+    assert!(logos_server::new_state_at(
+        path.to_str().unwrap(),
+        std::env::temp_dir().to_str().unwrap()
+    )
+    .is_ok());
     let first = std::fs::read(&path).unwrap();
     assert_eq!(first.len(), 32, "a fresh 32-byte key should be generated");
     // A second boot reuses the same key (stable server_vk).
-    assert!(logos_server::new_state_at(path.to_str().unwrap()).is_ok());
+    assert!(logos_server::new_state_at(
+        path.to_str().unwrap(),
+        std::env::temp_dir().to_str().unwrap()
+    )
+    .is_ok());
     assert_eq!(std::fs::read(&path).unwrap(), first);
     #[cfg(unix)]
     {

@@ -10,26 +10,52 @@ on:
       - "scripts/build-ios.sh"
       - "Cargo.*"
       - ".github/workflows/ios.yml"
+      - "deny.toml"
+      - "rust-toolchain.toml"
 
 # Least privilege: CI only needs to read the repo. cargo build/test executes
 # untrusted build.rs + proc-macros from the whole dependency tree, so the
-# GITHUB_TOKEN must not carry write scope. (Pin every `uses:` to a full commit
-# SHA as a follow-up — `@stable`/`@v4` are mutable refs.)
+# GITHUB_TOKEN must not carry write scope.
 permissions:
   contents: read
 
+env:
+  # Pinned Rust toolchain (must match rust-toolchain.toml).
+  RUST_TOOLCHAIN: "1.96.0"
+
 jobs:
-  # Fast Linux job: the whole Rust workspace (incl. the FFI crate + smoke test).
+  # Fast Linux job: the whole Rust workspace (incl. the FFI crate + smoke test),
+  # plus supply-chain checks.
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy, rustfmt
-      - run: cargo test --workspace
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo fmt --check
+
+      - name: Build and test workspace
+        run: cargo test --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: cargo-deny (licenses/advisories)
+        uses: EmbarkStudios/cargo-deny-action@8f84122a46a358a27cb0625d85ad60ab436a1b87 # v2
+        with:
+          command: check all
+
+      - name: cargo-audit (advisory database)
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
 
   # macOS job: build the xcframework + compile the SwiftUI app for the Simulator.
   # No code signing required for a simulator build, so this validates that the
@@ -37,17 +63,25 @@ jobs:
   ios:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install pinned Rust toolchain (iOS targets)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
+
       - name: Build LogosKit.xcframework + Swift bindings
         run: ./scripts/build-ios.sh
+
       - name: Install XcodeGen
         run: brew install xcodegen
+
       - name: Generate Xcode project
         working-directory: ios/LogosApp
         run: xcodegen generate
+
       - name: Build app (iOS Simulator, unsigned)
         working-directory: ios/LogosApp
         run: |
@@ -58,8 +92,9 @@ jobs:
             -configuration Debug \
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO
+
       - name: Upload xcframework artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: LogosKit-xcframework
           path: ios/LogosKit/LogosFFI.xcframework

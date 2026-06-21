@@ -115,7 +115,9 @@ final class Session: ObservableObject {
     private func loadIfExists() {
         guard FileManager.default.fileExists(atPath: storePath) else { return }
         do {
-            let c = try LogosClient.load(path: storePath, serverUrl: relayURL)
+            // password: nil → plaintext store + iOS FileProtection (unchanged behavior).
+            // At-rest encryption (Keychain-derived key + migration) is a tracked follow-up.
+            let c = try LogosClient.load(path: storePath, serverUrl: relayURL, password: nil)
             client = c
             username = c.username()
             mailboxId = c.mailbox()
@@ -132,7 +134,7 @@ final class Session: ObservableObject {
         let path = storePath
         Task {
             do {
-                let c = try await runBlocking { try LogosClient.create(path: path, serverUrl: relay, username: name) }
+                let c = try await runBlocking { try LogosClient.create(path: path, serverUrl: relay, username: name, password: nil) }
                 client = c
                 username = c.username()
                 mailboxId = c.mailbox()
