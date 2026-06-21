@@ -10,6 +10,9 @@ struct VerifyView: View {
     @State private var info: ContactSecurity?
     @State private var loading = true
     @State private var working = false
+    @State private var showQR = false
+    @State private var showScan = false
+    @State private var mismatch = false
 
     private var verified: Bool { info?.verified ?? false }
     private var changed: Bool { (info?.keyChanges ?? 0) > 0 }
@@ -33,11 +36,50 @@ struct VerifyView: View {
         .navigationTitle("Verify \(peer)")
         .navigationBarTitleDisplayMode(.inline)
         .task { await refresh() }
+        .sheet(isPresented: $showQR) {
+            if let sn = info?.safetyNumber { qrSheet(sn) }
+        }
+        .sheet(isPresented: $showScan) {
+            QRScanSheet(title: "Scan \(peer)’s code") { handleScan($0) }
+        }
+        .alert("Numbers don’t match", isPresented: $mismatch) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("The scanned safety number doesn’t match — don’t trust this conversation; someone may be intercepting it.")
+        }
     }
 
     private func refresh() async {
         info = await session.contactSecurity(peer)
         loading = false
+    }
+
+    private func handleScan(_ code: String) {
+        guard let (host, q) = LogosQR.parse(code), host == "verify", let scanned = q["sn"] else {
+            Haptic.warn(); mismatch = true; return
+        }
+        if scanned == info?.safetyNumber {
+            Task { working = true; await session.markVerified(peer); await refresh(); working = false }
+        } else {
+            Haptic.warn(); mismatch = true
+        }
+    }
+
+    private func qrSheet(_ sn: String) -> some View {
+        NavigationStack {
+            VStack(spacing: Space.lg) {
+                QRCodeView(payload: LogosQR.verifyPayload(safetyNumber: sn))
+                Text("Have \(peer) scan this from the **Scan** button on their Verify screen. If it matches, you’re both verified.")
+                    .font(LFont.subhead).foregroundStyle(LColor.inkSecondary)
+                    .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                Spacer()
+            }
+            .padding(Space.lg)
+            .logosBackground()
+            .navigationTitle("Your code for \(peer)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showQR = false } } }
+        }
     }
 
     private var header: some View {
@@ -90,6 +132,14 @@ struct VerifyView: View {
                     .font(LFont.mono).foregroundStyle(LColor.ink)
                     .multilineTextAlignment(.center).lineSpacing(6)
                     .textSelection(.enabled)
+                HStack(spacing: Space.sm) {
+                    Button { showQR = true } label: {
+                        Label("Show QR", systemImage: "qrcode").frame(maxWidth: .infinity)
+                    }.buttonStyle(.logosSecondary)
+                    Button { showScan = true } label: {
+                        Label("Scan", systemImage: "qrcode.viewfinder").frame(maxWidth: .infinity)
+                    }.buttonStyle(.logosSecondary)
+                }
                 if verified {
                     Label("Verified", systemImage: "checkmark.shield.fill")
                         .font(LFont.headline).foregroundStyle(LColor.verified)

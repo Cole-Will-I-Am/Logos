@@ -6,6 +6,7 @@ struct SettingsView: View {
     @State private var copied = false
     @State private var relayMode = 0       // 0 = public, 1 = private relay
     @State private var privateURL = ""
+    @State private var showMyQR = false
 
     var body: some View {
         ScrollView {
@@ -21,6 +22,7 @@ struct SettingsView: View {
         .logosBackground(watermark: true)
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showMyQR) { myQRSheet }
         .onAppear {
             relayMode = session.relayURL == Session.defaultRelay ? 0 : 1
             privateURL = relayMode == 1 ? session.relayURL : ""
@@ -122,9 +124,38 @@ struct SettingsView: View {
                     .font(LFont.footnote.weight(.medium)).foregroundStyle(LColor.goldText)
                 }
             }
+            if session.username != nil {
+                Button { showMyQR = true } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "qrcode")
+                        Text("My QR code")
+                    }
+                    .font(LFont.footnote.weight(.medium)).foregroundStyle(LColor.goldText)
+                }
+            }
         }
         .frame(maxWidth: .infinity)
         .cardStyle(padding: Space.lg)
+    }
+
+    private var myQRSheet: some View {
+        NavigationStack {
+            VStack(spacing: Space.lg) {
+                LAvatar(name: session.username ?? "?", size: 64)
+                Text(session.username.map { "@\($0)" } ?? "")
+                    .font(LFont.title3).foregroundStyle(LColor.ink)
+                QRCodeView(payload: LogosQR.addPayload(username: session.username ?? "", relay: session.relayURL))
+                Text("Have someone scan this from **New chat → Scan** to message you. You both need to be on the same relay.")
+                    .font(LFont.subhead).foregroundStyle(LColor.inkSecondary)
+                    .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                Spacer()
+            }
+            .padding(Space.lg)
+            .logosBackground()
+            .navigationTitle("My code")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showMyQR = false } } }
+        }
     }
 
     private var privacySection: some View {

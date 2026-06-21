@@ -252,6 +252,8 @@ struct ComposeSheet: View {
     @EnvironmentObject var session: Session
     @Environment(\.dismiss) private var dismiss
     @State private var peer = ""
+    @State private var showScan = false
+    @State private var wrongRelay = false
     @FocusState private var focused: Bool
 
     private var trimmed: String { peer.trimmingCharacters(in: .whitespaces) }
@@ -277,6 +279,10 @@ struct ComposeSheet: View {
                 Button("Start chat", action: start)
                     .buttonStyle(.logosPrimary)
                     .disabled(trimmed.isEmpty)
+                Button { showScan = true } label: {
+                    Label("Scan a code", systemImage: "qrcode.viewfinder").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.logosSecondary)
                 Spacer()
             }
             .padding(Space.lg)
@@ -289,7 +295,23 @@ struct ComposeSheet: View {
                 }
             }
             .onAppear { focused = true }
+            .sheet(isPresented: $showScan) {
+                QRScanSheet(title: "Scan to add") { handleScan($0) }
+            }
+            .alert("Different relay", isPresented: $wrongRelay) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("That contact is on a different relay. Switch to their relay in Settings → Network to message them.")
+            }
         }
+    }
+
+    private func handleScan(_ code: String) {
+        guard let (host, q) = LogosQR.parse(code), host == "add", let u = q["u"] else { return }
+        if let r = q["r"], r != session.relayURL { wrongRelay = true; return }
+        Haptic.tap()
+        session.startConversation(with: u)
+        dismiss()
     }
 
     private func start() {

@@ -21,7 +21,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.colecantcode.logos
         PRODUCT_NAME: Logos
-        MARKETING_VERSION: "0.1.4"
+        MARKETING_VERSION: "0.1.5"
         CURRENT_PROJECT_VERSION: 1
         # Signing: cloud-managed automatic signing via the App Store Connect API
         # key in CI (no Mac, nothing to export). The workflow passes/overrides
@@ -36,6 +36,7 @@ targets:
         # Logos does use custom E2EE — revisit with a proper self-classification
         # before any public App Store release (see docs/CI_TESTFLIGHT_SETUP.md).
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: false
+        INFOPLIST_KEY_NSCameraUsageDescription: "Logos uses the camera only to scan a contact’s QR code — to add them or verify their safety number. Nothing is recorded."
         INFOPLIST_KEY_CFBundleDisplayName: Logos
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: true
         INFOPLIST_KEY_UILaunchScreen_Generation: true
