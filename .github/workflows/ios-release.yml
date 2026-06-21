@@ -31,6 +31,10 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Pinned Rust toolchain (must match rust-toolchain.toml).
+  RUST_TOOLCHAIN: "1.96.0"
+
 jobs:
   build-ios:
     runs-on: macos-15
@@ -45,10 +49,10 @@ jobs:
       EXPORT_PATH: ${{ github.workspace }}/build/export
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Select latest stable Xcode
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@1242409711ff5721add51979e9e11e23ebb7e5a4 # v1
         with:
           xcode-version: latest-stable
 
@@ -65,8 +69,9 @@ jobs:
           [ "$missing" -eq 0 ] || exit 1
 
       - name: Install Rust toolchain (iOS targets)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
 
       - name: Build LogosKit.xcframework + Swift bindings (Rust core)
@@ -150,7 +155,7 @@ jobs:
             -authenticationKeyIssuerID "$ASC_ISSUER_ID"
 
       - name: Upload .ipa as build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Logos-ipa
           path: ${{ env.EXPORT_PATH }}/*.ipa

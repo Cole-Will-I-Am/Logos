@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+zeroize.workspace = true
 logos-identity.workspace = true
 logos-pqxdh.workspace = true
 logos-ratchet.workspace = true

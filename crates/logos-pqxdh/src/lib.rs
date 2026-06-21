@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use x25519_dalek::{PublicKey as X25519Public, StaticSecret as X25519Secret};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Domain-separation prefix for the single-curve (X25519) variant, per X3DH.
 const F: [u8; 32] = [0xFF; 32];
@@ -41,15 +41,18 @@ pub struct InitialMessage {
 }
 
 /// Result of running the handshake as the initiator.
+#[derive(ZeroizeOnDrop)]
 pub struct InitiatorResult {
     /// Shared secret key — root key for the Double Ratchet.
     pub root_key: [u8; 32],
     /// The responder's signed prekey public — the ratchet's initial DH key.
     pub responder_signed_prekey_pub: [u8; 32],
+    #[zeroize(skip)]
     pub initial_message: InitialMessage,
 }
 
 /// Result of running the handshake as the responder.
+#[derive(ZeroizeOnDrop)]
 pub struct ResponderResult {
     pub root_key: [u8; 32],
     /// Our signed-prekey private — the ratchet's initial DH key (responder side).
@@ -102,9 +105,9 @@ pub fn initiate(
     let eph_pub = X25519Public::from(&eph).to_bytes();
 
     // Classical X3DH legs.
-    let dh1 = dh(me.dh_secret(), &spk_b); // IK_A x SPK_B
-    let dh2 = dh(&eph, &ik_b.dh); // EK_A x IK_B
-    let dh3 = dh(&eph, &spk_b); // EK_A x SPK_B
+    let mut dh1 = dh(me.dh_secret(), &spk_b); // IK_A x SPK_B
+    let mut dh2 = dh(&eph, &ik_b.dh); // EK_A x IK_B
+    let mut dh3 = dh(&eph, &spk_b); // EK_A x SPK_B
 
     // Post-quantum leg.
     let kem_pub = logos_identity::KemPublic::from_bytes(&bundle.kem_prekey.public)?;
@@ -116,14 +119,19 @@ pub fn initiate(
     ikm.extend_from_slice(&dh2);
     ikm.extend_from_slice(&dh3);
     let one_time_prekey_id = bundle.one_time_prekey.as_ref().map(|otk| {
-        let dh4 = dh(&eph, &otk.public); // EK_A x OPK_B
+        let mut dh4 = dh(&eph, &otk.public); // EK_A x OPK_B
         ikm.extend_from_slice(&dh4);
+        dh4.zeroize();
         otk.id
     });
     ikm.extend_from_slice(&ss);
 
     let info = transcript(&ik_a, &ik_b, &eph_pub, &kem_ct.0);
     let root_key = derive(ikm, &info);
+
+    dh1.zeroize();
+    dh2.zeroize();
+    dh3.zeroize();
 
     Ok(InitiatorResult {
         root_key,
@@ -154,9 +162,9 @@ pub fn respond(
     let ik_b = me.public();
     let spk_secret = X25519Secret::from(signed_prekey_priv);
 
-    let dh1 = dh(&spk_secret, &ik_a.dh); // SPK_B x IK_A
-    let dh2 = dh(me.dh_secret(), &msg.ephemeral_pub); // IK_B x EK_A
-    let dh3 = dh(&spk_secret, &msg.ephemeral_pub); // SPK_B x EK_A
+    let mut dh1 = dh(&spk_secret, &ik_a.dh); // SPK_B x IK_A
+    let mut dh2 = dh(me.dh_secret(), &msg.ephemeral_pub); // IK_B x EK_A
+    let mut dh3 = dh(&spk_secret, &msg.ephemeral_pub); // SPK_B x EK_A
 
     let ss = kem_secret.decapsulate(&KemCiphertext(msg.kem_ciphertext.clone()))?;
 
@@ -167,13 +175,18 @@ pub fn respond(
     ikm.extend_from_slice(&dh3);
     if msg.one_time_prekey_id.is_some() {
         let otk_priv = one_time_prekey_priv.ok_or(PqxdhError::MissingOneTimePrekey)?;
-        let dh4 = dh(&X25519Secret::from(otk_priv), &msg.ephemeral_pub);
+        let mut dh4 = dh(&X25519Secret::from(otk_priv), &msg.ephemeral_pub);
         ikm.extend_from_slice(&dh4);
+        dh4.zeroize();
     }
     ikm.extend_from_slice(&ss);
 
     let info = transcript(&ik_a, &ik_b, &msg.ephemeral_pub, &msg.kem_ciphertext);
     let root_key = derive(ikm, &info);
+
+    dh1.zeroize();
+    dh2.zeroize();
+    dh3.zeroize();
 
     Ok(ResponderResult {
         root_key,

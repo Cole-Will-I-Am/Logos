@@ -22,11 +22,21 @@ use logos_proto::{
 use logos_ratchet::RatchetState;
 use logos_sealed::{seal, unseal, SealedEnvelope, SenderCertificate};
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const ONE_TIME_PREKEY_COUNT: u32 = 20;
 const KEM_PREKEY_COUNT: u32 = 10;
 /// Reserved id for the reusable last-resort ML-KEM prekey (one-time ids start at 1).
 const LAST_RESORT_KEM_ID: u32 = 0;
+
+/// Hard ceiling on any relay response body the client will deserialize. A
+/// malicious/compromised relay cannot force unbounded buffering before the
+/// caller sees a parse failure (F-08 sibling).
+const MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Max envelopes returned in a single `/v1/fetch` call. Extra envelopes remain
+/// on the server and are fetched on the next poll.
+const MAX_FETCH_ENVELOPES: usize = 1_000;
 
 /// Errors from the client engine. The variants the UI must treat differently are
 /// **typed** (not stringly): `IdentityChanged` drives the high-friction identity
@@ -87,27 +97,56 @@ fn http_client() -> reqwest::blocking::Client {
         .unwrap_or_else(|_| reqwest::blocking::Client::new())
 }
 
-#[derive(Serialize, Deserialize)]
+/// Read a relay response with a hard byte cap. Fails closed: if the server
+/// advertises a body larger than `MAX_RESPONSE_BODY_BYTES`, or if the streamed
+/// body exceeds it, we return a `Network` error instead of buffering forever.
+fn read_body_with_limit(resp: reqwest::blocking::Response, limit: usize) -> Result<Vec<u8>> {
+    if let Some(len) = resp.content_length() {
+        if len as usize > limit {
+            return Err(ClientError::Network(format!(
+                "response body too large (advertised {len} > {limit})"
+            )));
+        }
+    }
+    use std::io::Read;
+    let mut out = Vec::with_capacity(4096);
+    let mut take = resp.take(limit as u64 + 1);
+    take.read_to_end(&mut out)
+        .map_err(|e| ClientError::Network(e.to_string()))?;
+    if out.len() > limit {
+        return Err(ClientError::Network(format!(
+            "response body exceeded {limit} byte cap"
+        )));
+    }
+    Ok(out)
+}
+
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct OtkSecret {
+    #[zeroize(skip)]
     id: u32,
     secret: [u8; 32],
 }
 
 /// A stored ML-KEM prekey secret (one-time or last-resort) (F-05).
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct KemSecretRec {
+    #[zeroize(skip)]
     id: u32,
     secret: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct Session {
     ratchet: RatchetState,
     /// Full peer identity (`ed` + `dh`). The `dh` half seals envelopes to the
     /// peer; the full identity derives the peer's mailbox id (which must bind the
     /// Ed25519 key — see `logos_proto::mailbox_id`).
+    #[zeroize(skip)]
     peer_identity: IdentityPublic,
+    #[zeroize(skip)]
     sent_initial: bool,
+    #[zeroize(skip)]
     pending_initial: Option<InitialMessage>,
 }
 
@@ -136,6 +175,25 @@ struct Store {
     cert: Option<SenderCertificate>,
 }
 
+impl Drop for Store {
+    fn drop(&mut self) {
+        // Zeroize secret material before the store is freed. Public metadata
+        // (username, ids, pinned identities, certificates) is intentionally
+        // skipped — it carries no key material.
+        self.identity_secret.zeroize();
+        self.signed_prekey_secret.zeroize();
+        for rec in &mut self.kem_one_time {
+            rec.zeroize();
+        }
+        self.kem_last_resort.zeroize();
+        for rec in &mut self.one_time {
+            rec.zeroize();
+        }
+        for session in self.sessions.values_mut() {
+            session.ratchet.zeroize();
+        }
+    }
+}
 /// Safety-number confirmation + identity-change tracking for one contact.
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct Verification {
@@ -361,7 +419,7 @@ impl Client {
                 ratchet,
                 peer_identity: bundle.identity,
                 sent_initial: false,
-                pending_initial: Some(init.initial_message),
+                pending_initial: Some(init.initial_message.clone()),
             },
         );
         Ok(())
@@ -431,7 +489,7 @@ impl Client {
         let identity = self.identity();
         let id_pub = identity.public();
         let fetch_sig = identity.sign(&fetch_signed_bytes(&id_pub)).to_vec();
-        let resp: FetchResponse = self
+        let fetch_resp = self
             .http
             .post(format!("{}/v1/fetch", self.server_url))
             .json(&FetchRequest {
@@ -441,9 +499,10 @@ impl Client {
             .send()
             .map_err(net)?
             .error_for_status()
-            .map_err(net)?
-            .json()
             .map_err(net)?;
+        let resp_bytes = read_body_with_limit(fetch_resp, MAX_RESPONSE_BODY_BYTES)?;
+        let mut resp: FetchResponse = serde_json::from_slice(&resp_bytes).map_err(err)?;
+        resp.envelopes.truncate(MAX_FETCH_ENVELOPES);
 
         let server_vk = self
             .store

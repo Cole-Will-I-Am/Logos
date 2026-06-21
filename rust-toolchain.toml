@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable"
+# Pinned toolchain for reproducible, auditable builds. Keep in sync with
+# .github/workflows/ios.yml and any container/development images.
+channel = "1.96.0"
 components = ["rustfmt", "clippy"]
