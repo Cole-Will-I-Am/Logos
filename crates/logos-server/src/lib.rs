@@ -12,7 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -34,6 +34,12 @@ const CERT_TTL_SECS: u64 = 24 * 60 * 60;
 /// can deliver). This caps disk/memory blast radius to one mailbox; real abuse
 /// resistance (auth, rate limits, TTL sweep) is tracked separately.
 const MAX_MAILBOX_MESSAGES: usize = 4096;
+
+/// Hard cap on JSON request bodies accepted by the relay. Registration has the
+/// largest legitimate body today because it uploads X25519 + ML-KEM prekey pools;
+/// 1 MiB leaves room for current protocol overhead while preventing a malicious
+/// peer from forcing unbounded JSON buffering before handlers run.
+const MAX_RELAY_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 
 struct DirEntry {
     identity: IdentityPublic,
@@ -132,6 +138,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/mailbox/{id}", post(post_mailbox))
         .route("/v1/fetch", post(fetch))
         .route("/v1/ack", post(ack))
+        .layer(DefaultBodyLimit::max(MAX_RELAY_REQUEST_BODY_BYTES))
         .with_state(state)
 }
 
