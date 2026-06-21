@@ -48,9 +48,23 @@ const MAX_RELAY_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 /// automatically purged so a forgotten mailbox cannot grow without bound.
 const DEFAULT_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 
-/// How often the server sweeps expired envelopes and writes a persistence
-/// snapshot.
+/// How often the server sweeps expired envelopes.
 const MAINTENANCE_INTERVAL_SECONDS: u64 = 60;
+
+/// Snapshot debounce (red-team H1): mutations only set a `dirty` flag; this task is
+/// the SOLE snapshot writer and coalesces bursts, so no request ever triggers a
+/// full-state rewrite (the old per-request snapshot was O(N²) amplification). Bounds
+/// crash data-loss to ~this many seconds.
+const SNAPSHOT_INTERVAL_SECONDS: u64 = 5;
+
+/// Global admission caps (red-team H2) so an unauthenticated attacker cannot exhaust
+/// relay state. NOTE: per-IP limits are intentionally NOT used — the relay sits
+/// behind a Cloudflare tunnel, so the socket peer is always localhost; global caps +
+/// a global registration rate limit are the controls that actually bind here.
+const MAX_DIRECTORY_ENTRIES: usize = 100_000;
+const MAX_MAILBOXES: usize = 200_000;
+/// Cap a directory entry's one-time prekey pools so `replenish` can't grow unbounded.
+const MAX_PREKEY_POOL: usize = 200;
 
 struct DirEntry {
     identity: IdentityPublic,
@@ -86,9 +100,13 @@ struct RateLimiter {
 
 #[derive(Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 enum RateKey {
-    /// Per-mailbox posting rate limit. Per-IP limits require connect-info
-    /// plumbing in the serving layer and are tracked as a follow-up.
+    /// Per-mailbox posting rate limit.
     MailboxId(String),
+    /// Per-username directory-read limit so a one-time prekey pool can't be drained
+    /// for free by anonymous GETs (red-team M1).
+    Directory(String),
+    /// Single global bucket bounding the rate of NEW account registrations (H2).
+    Registrations,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -124,6 +142,8 @@ struct Inner {
     rate_limiter: RateLimiter,
     snapshot_path: Option<PathBuf>,
     ttl_seconds: u64,
+    /// Set by any state mutation; the snapshot task is the sole writer + clearer.
+    dirty: bool,
 }
 
 #[derive(Clone)]
@@ -140,6 +160,7 @@ fn state_from_seed(seed: [u8; 32], snapshot_path: Option<PathBuf>, ttl_seconds: 
         rate_limiter: RateLimiter::default(),
         snapshot_path,
         ttl_seconds,
+        dirty: false,
     })))
 }
 
@@ -184,9 +205,17 @@ pub fn new_state_at(key_path: &str, data_dir: &str) -> std::io::Result<AppState>
     let snapshot = Path::new(data_dir).join("snapshot.json");
     let state = state_from_seed(seed, Some(snapshot.clone()), DEFAULT_TTL_SECONDS);
     if snapshot.exists() {
-        state
-            .load_snapshot()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        if let Err(e) = state.load_snapshot() {
+            // A corrupt snapshot must not take the whole relay down (red-team L6).
+            // Move it aside for forensics and start with empty state rather than refuse
+            // to boot (availability over silently losing the file).
+            let aside = snapshot.with_extension("corrupt");
+            let _ = std::fs::rename(&snapshot, &aside);
+            eprintln!(
+                "WARN: snapshot load failed ({e}); moved to {} and started fresh",
+                aside.display()
+            );
+        }
     }
     Ok(state)
 }
@@ -226,30 +255,57 @@ impl AppState {
             .rate_limiter
             .buckets
             .retain(|_, b| now.saturating_sub(b.last_update) < 3600);
-        drop(inner);
-        let _ = self.save_snapshot();
+        // Expirations mutated state — let the snapshot task persist it (no sync write).
+        inner.dirty = true;
     }
 
-    fn save_snapshot(&self) -> std::io::Result<()> {
-        let inner = self.0.lock().unwrap();
-        let Some(path) = inner.snapshot_path.as_ref() else {
-            return Ok(());
+    /// The SOLE snapshot writer (red-team H1): writes only when `dirty`, so a burst of
+    /// requests collapses to at most one full-state write per snapshot interval instead
+    /// of one O(N) clone+write per request. fsyncs the data before the atomic rename
+    /// (red-team L6).
+    fn snapshot_if_dirty(&self) -> std::io::Result<()> {
+        let (snap, path) = {
+            let mut inner = self.0.lock().unwrap();
+            let Some(path) = inner.snapshot_path.clone() else {
+                inner.dirty = false;
+                return Ok(());
+            };
+            if !inner.dirty {
+                return Ok(());
+            }
+            let snap = SerializableState {
+                next_id: inner.next_id,
+                directory: inner
+                    .directory
+                    .iter()
+                    .map(|(k, v)| (k.clone(), SerializableDirEntry::from(v)))
+                    .collect(),
+                mailboxes: inner.mailboxes.clone(),
+            };
+            inner.dirty = false; // a mutation racing after this re-sets dirty → next tick
+            (snap, path)
         };
-        let snap = SerializableState {
-            next_id: inner.next_id,
-            directory: inner
-                .directory
-                .iter()
-                .map(|(k, v)| (k.clone(), SerializableDirEntry::from(v)))
-                .collect(),
-            mailboxes: inner.mailboxes.clone(),
+        let write = || -> std::io::Result<()> {
+            use std::io::Write;
+            let bytes = serde_json::to_vec_pretty(&snap).map_err(std::io::Error::other)?;
+            let tmp = path.with_extension("tmp");
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, &path)?;
+            if let Some(dir) = path.parent() {
+                if let Ok(d) = std::fs::File::open(dir) {
+                    let _ = d.sync_all();
+                }
+            }
+            Ok(())
         };
-        let path = path.clone();
-        drop(inner);
-        let bytes = serde_json::to_vec_pretty(&snap).map_err(std::io::Error::other)?;
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, path)
+        if let Err(e) = write() {
+            // Re-arm so the next tick retries rather than silently dropping the write.
+            self.0.lock().unwrap().dirty = true;
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn load_snapshot(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -351,9 +407,27 @@ async fn register(
     })?;
 
     let mut inner = state.0.lock().unwrap();
+    let is_new = !inner.directory.contains_key(&req.username);
     if let Some(existing) = inner.directory.get(&req.username) {
         if existing.identity != req.identity {
             return Err((StatusCode::CONFLICT, "username taken".into()));
+        }
+    }
+    if is_new {
+        // Bound NEW-account creation rate + total directory size (red-team H2).
+        // Re-registration of an existing username (idempotent prekey refresh) is exempt.
+        let now = now();
+        if !inner
+            .rate_limiter
+            .check(RateKey::Registrations, 5.0, 50.0, now)
+        {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "registration rate limit".into(),
+            ));
+        }
+        if inner.directory.len() >= MAX_DIRECTORY_ENTRIES {
+            return Err((StatusCode::SERVICE_UNAVAILABLE, "relay at capacity".into()));
         }
     }
     inner.directory.insert(
@@ -366,8 +440,7 @@ async fn register(
             one_time: req.one_time_prekeys.into_iter().collect(),
         },
     );
-    drop(inner);
-    let _ = state.save_snapshot();
+    inner.dirty = true;
     Ok(StatusCode::OK)
 }
 
@@ -376,16 +449,24 @@ async fn directory(
     AxumPath(username): AxumPath<String>,
 ) -> Result<Json<DirectoryResponse>, ApiError> {
     let mut inner = state.0.lock().unwrap();
+    // Throttle reads per username so a one-time prekey pool can't be drained for free
+    // by anonymous GETs (red-team M1).
+    let now = now();
+    if !inner
+        .rate_limiter
+        .check(RateKey::Directory(username.clone()), 1.0, 10.0, now)
+    {
+        return Err((StatusCode::TOO_MANY_REQUESTS, "directory rate limit".into()));
+    }
     let entry = inner
         .directory
         .get_mut(&username)
         .ok_or((StatusCode::NOT_FOUND, "unknown user".into()))?;
     let one_time_prekey = entry.one_time.pop_front();
     // Consume a one-time ML-KEM prekey if available, else fall back to last-resort (F-05).
-    let kem_prekey = entry
-        .kem_one_time
-        .pop_front()
-        .unwrap_or_else(|| entry.last_resort_kem.clone());
+    let kem_one_time = entry.kem_one_time.pop_front();
+    let consumed = one_time_prekey.is_some() || kem_one_time.is_some();
+    let kem_prekey = kem_one_time.unwrap_or_else(|| entry.last_resort_kem.clone());
     let bundle = PreKeyBundle {
         username: username.clone(),
         identity: entry.identity,
@@ -393,8 +474,9 @@ async fn directory(
         one_time_prekey,
         kem_prekey,
     };
-    drop(inner);
-    let _ = state.save_snapshot();
+    if consumed {
+        inner.dirty = true; // only persist when a prekey was actually popped
+    }
     Ok(Json(DirectoryResponse { bundle }))
 }
 
@@ -447,6 +529,11 @@ async fn post_mailbox(
         {
             return StatusCode::TOO_MANY_REQUESTS;
         }
+        // Cap the total number of mailboxes so an attacker can't create unbounded
+        // mailboxes (red-team H2); per-mailbox length is capped separately below.
+        if !inner.mailboxes.contains_key(&id) && inner.mailboxes.len() >= MAX_MAILBOXES {
+            return StatusCode::INSUFFICIENT_STORAGE;
+        }
         let ttl = inner.ttl_seconds;
         let msg_id = inner.next_id;
         let queue = inner.mailboxes.entry(id).or_default();
@@ -462,8 +549,8 @@ async fn post_mailbox(
             envelope: req.envelope,
         });
         inner.next_id += 1;
+        inner.dirty = true;
     }
-    let _ = state.save_snapshot();
     StatusCode::OK
 }
 
@@ -508,10 +595,12 @@ async fn ack(
     let mb = mailbox_id(&req.identity);
     let mut inner = state.0.lock().unwrap();
     if let Some(q) = inner.mailboxes.get_mut(&mb) {
+        let before = q.len();
         q.retain(|e| !req.ids.contains(&e.id));
+        if q.len() != before {
+            inner.dirty = true;
+        }
     }
-    drop(inner);
-    let _ = state.save_snapshot();
     Ok(StatusCode::OK)
 }
 
@@ -534,8 +623,15 @@ async fn replenish(
     }
     entry.one_time.extend(req.one_time_prekeys);
     entry.kem_one_time.extend(req.kem_prekeys);
-    drop(inner);
-    let _ = state.save_snapshot();
+    // Cap the pools so replenish can't grow a directory entry without bound (H2):
+    // keep the most recently published prekeys.
+    while entry.one_time.len() > MAX_PREKEY_POOL {
+        entry.one_time.pop_front();
+    }
+    while entry.kem_one_time.len() > MAX_PREKEY_POOL {
+        entry.kem_one_time.pop_front();
+    }
+    inner.dirty = true;
     Ok(StatusCode::OK)
 }
 
@@ -553,6 +649,17 @@ pub async fn run(
         loop {
             interval.tick().await;
             maintenance_state.sweep_expired();
+        }
+    });
+    // Sole snapshot writer (red-team H1): coalesces dirty state to one write per
+    // interval, off the request path and off the async reactor via spawn_blocking.
+    let snapshot_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(SNAPSHOT_INTERVAL_SECONDS));
+        loop {
+            interval.tick().await;
+            let s = snapshot_state.clone();
+            let _ = tokio::task::spawn_blocking(move || s.snapshot_if_dirty()).await;
         }
     });
     let listener = tokio::net::TcpListener::bind(addr).await?;
