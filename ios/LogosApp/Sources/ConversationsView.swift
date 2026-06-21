@@ -14,6 +14,12 @@ struct ConversationsView: View {
             }
             .navigationTitle(session.username.map { "@\($0)" } ?? "Logos")
             .navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .top) {
+                if !session.online && session.username != nil {
+                    OfflineBanner { session.syncNow() }
+                }
+            }
+            .animation(Motion.standard, value: session.online)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     NavigationLink { SettingsView() } label: {

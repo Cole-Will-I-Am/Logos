@@ -17,6 +17,10 @@ struct ChatView: View {
             composer
         }
         .logosBackground(watermark: true)
+        .safeAreaInset(edge: .top) {
+            if !session.online { OfflineBanner { session.syncNow() } }
+        }
+        .animation(Motion.standard, value: session.online)
         .navigationTitle(peer)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

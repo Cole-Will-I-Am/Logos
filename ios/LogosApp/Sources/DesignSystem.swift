@@ -341,6 +341,24 @@ struct LBanner: View {
     }
 }
 
+// MARK: - Offline banner
+
+/// Shown at the top of the chat list / a thread when the last relay sync failed.
+/// Reassures (messages will retry) and offers a manual retry. Caution, not alarm.
+struct OfflineBanner: View {
+    let onRetry: () -> Void
+    var body: some View {
+        LBanner(tone: .caution, icon: "wifi.slash",
+                title: "Offline",
+                message: "Can’t reach the relay — messages will retry automatically.",
+                actionTitle: "Retry", action: onRetry)
+            .padding(.horizontal, Space.md)
+            .padding(.vertical, Space.xs)
+            .background(LColor.canvas)
+            .transition(.move(edge: .top).combined(with: .opacity))
+    }
+}
+
 // MARK: - Empty state
 
 struct LEmptyState: View {

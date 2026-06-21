@@ -40,6 +40,11 @@ final class Session: ObservableObject {
     @Published var relayURL: String
     @Published var lastError: String?
 
+    // Connectivity: reflects whether the last relay poll/sync succeeded.
+    @Published var online = true
+    @Published var lastSynced: Date?
+    @Published var syncing = false
+
     /// The default public relay. Identities/history on this relay keep the original
     /// unsuffixed filenames so existing installs aren't orphaned by per-relay stores.
     static let defaultRelay = "https://relay.manticthink.com"
@@ -83,6 +88,7 @@ final class Session: ObservableObject {
         client = nil
         username = nil; mailboxId = ""
         conversations = []; messages = [:]; security = [:]; lastError = nil
+        online = true; lastSynced = nil; syncing = false
         relayURL = trimmed
         UserDefaults.standard.set(trimmed, forKey: "relayURL")
         loadHistory()
@@ -278,8 +284,13 @@ final class Session: ObservableObject {
         }
     }
 
+    /// Force an immediate relay check (manual "Sync now").
+    func syncNow() { Task { await pollOnce() } }
+
     private func pollOnce() async {
-        guard let client else { return }
+        guard let client, !syncing else { return }
+        syncing = true
+        defer { syncing = false }
         do {
             let incoming = try await runBlocking { try client.recv() }
             for m in incoming {
@@ -289,7 +300,10 @@ final class Session: ObservableObject {
                 if security[m.from] == nil { security[m.from] = .encrypted }
             }
             if !incoming.isEmpty { persist() }
+            online = true
+            lastSynced = Date()
         } catch {
+            online = false
             lastError = friendly(error)
         }
     }

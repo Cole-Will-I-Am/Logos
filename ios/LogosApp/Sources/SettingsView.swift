@@ -32,6 +32,7 @@ struct SettingsView: View {
             Text("NETWORK").font(LFont.caption).fontWeight(.semibold)
                 .foregroundStyle(LColor.inkTertiary).tracking(0.6).padding(.leading, Space.xs)
             VStack(alignment: .leading, spacing: Space.sm) {
+                relayStatusRow
                 Picker("Relay", selection: $relayMode) {
                     Text("Public").tag(0)
                     Text("Private relay").tag(1)
@@ -79,6 +80,27 @@ struct SettingsView: View {
         dismiss()
     }
     private func hostOf(_ s: String) -> String { URL(string: s)?.host ?? s }
+
+    private var relayStatusRow: some View {
+        HStack(spacing: Space.xs) {
+            Circle().fill(session.online ? LColor.verified : LColor.danger)
+                .frame(width: 8, height: 8)
+            Text(session.online ? "Connected" : "Can’t reach relay")
+                .font(LFont.footnote.weight(.medium)).foregroundStyle(LColor.ink)
+            Spacer()
+            if let t = session.lastSynced {
+                Text("Synced \(t, style: .time)")
+                    .font(LFont.caption).foregroundStyle(LColor.inkTertiary)
+            }
+            Button { Haptic.tap(); session.syncNow() } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(LColor.goldText)
+            }
+            .disabled(session.username == nil || session.syncing)
+            .accessibilityLabel("Sync now")
+        }
+    }
 
     private var identityCard: some View {
         VStack(spacing: Space.md) {
