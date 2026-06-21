@@ -46,28 +46,40 @@ Remaining from the external review: **key transparency** (the big one — append
 verifiable log; do before any public "trust us" positioning), then an **external
 audit**. Hybridizing the sealed-sender envelope for PQ sender-metadata is also open.
 
-## ▶︎ Resuming — immediate next steps (paused here)
+## ▶︎ Resuming — current state + next steps (handoff)
 
-Picked up in this order when work resumes:
+**Live now:** iOS app on TestFlight through **v0.1.17** (no-Mac CI pipeline; ASC creds,
+app record, signing — see `CI_TESTFLIGHT_SETUP.md`). Public relay
+**relay.manticthink.com** deployed (Cloudflare tunnel; persistent + red-team-hardened).
+`main` is the built/verified branch — build from `main`. Whole-repo VPS backups in
+`/srv/backups/logos/`. The full red-team report is `docs/REDTEAM-2026-06.md` (kept LOCAL,
+not committed — it lists open follow-ups).
 
-1. **Public TLS relay endpoint** *(finish P2 — needed before a device can connect)*.
-   The relay runs as systemd `logos-relay.service` on the VPS at `127.0.0.1:8787`
-   (binary `/srv/logos/logos-server`, key `/srv/logos/logos-server-key`). Expose it
-   over HTTPS at a stable hostname — **decision needed:** a dedicated domain +
-   reverse proxy (nginx/caddy) **or** a Cloudflare tunnel. Then point the iOS app's
-   default relay URL at it.
-2. **TestFlight / device build** *(finish P2)*. CI currently does an unsigned
-   Simulator build only. A signed device/TestFlight build **needs an Apple developer
-   account + signing secrets** (ASC API key, etc.) wired into `.github/workflows/ios.yml`
-   — mirror the SEER pipeline.
-3. **P3 — Key transparency** *(headline security phase; do before any public/"trust
-   us" positioning)*. Append-only verifiable log of identity keys + client auditing/
-   gossip. Removes the relay as identity authority (the F-02 endgame) and upgrades
-   the current TOFU pinning to continuous verification.
+**Shipped to date:** 1:1 E2EE (PQXDH + Double Ratchet + sealed sender + TOFU), identity
+**recovery phrase** (24-word seed; 48-word legacy full-key), **at-rest encryption**
+(device Keychain key for store + history), **persistent relay**, **local contacts**, the
+**full red-team remediation** (all HIGH/MEDIUM + cheap LOW — relay H1/H2, client
+M3/M4, iOS M2/L4, etc.), **BYOK AI** (Anthropic/OpenAI/Ollama, device→provider, relay
+never in the path) + **on-device AI default** (Apple Foundation Models) + **1:1 catch-up
+summaries**.
 
-Cross-cutting hardening (any time, non-blocking): redb relay persistence + TTL,
-Argon2id client-store encryption, prekey-fetch rate limits (F-08), full zeroization
-(F-12). Then later phases P4 (MLS groups) / P5 (mixnet, blinded mailbox, PSI).
+**Agreed next build order (resume here):**
+
+1. ✅ On-device AI provider (0.1.17).
+2. **Group chats — sender-key v1** (see [`GROUP_CHAT_PLAN.md`](GROUP_CHAT_PLAN.md), P4):
+   `logos-proto` wire types + sender-key crypto + static-group create/send/recv (Rust
+   tests) → membership/admins + rekey-on-removal → iOS UI. **Fold in the M1
+   prekey-replenishment prereq** (groups multiply pairwise handshakes). Largest +
+   most security-sensitive build; stage + CI-verify.
+3. **AI-1 — on-device semantic search + memory** (see
+   [`AI_NATIVE_BLUEPRINT.md`](AI_NATIVE_BLUEPRINT.md)): grounded, source-cited search
+   over local history on the existing BYOK/on-device plumbing.
+
+**Open security follow-ups (red-team `REDTEAM-2026-06.md`, tracked):** M1 client
+prekey-lifecycle (replenish + signed-prekey rotation; the relay free-drain is already
+fixed) · **P3 key transparency** (the F-02 endgame — do before any public "trust us"
+claim) · L1 quadratic skipped-key eviction · L2 sealed-sender PQ metadata · L7 pin CI
+build tools · **external professional crypto audit = the real production gate.**
 
 ## ▶︎ Security-review follow-ups (open — from PR #1 `security-review-fixes`)
 
