@@ -106,6 +106,8 @@ multi-device · backups/recovery · abuse defenses · **external security audit*
   sealed-sender / relay construction (written to be auditable).
 - [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) — assets, adversaries, and
   what is explicitly out of scope.
+- [`docs/SIGNAL_PLUS_BLUEPRINT.md`](docs/SIGNAL_PLUS_BLUEPRINT.md) — roadmap for
+  turning Logos from a research messenger into a credible Signal-plus system.
 
 ## License
 
