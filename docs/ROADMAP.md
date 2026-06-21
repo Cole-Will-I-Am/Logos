@@ -32,10 +32,19 @@ the **whole** program in view while we build it phase by phase. Status legend:
 - **Multi-account** (multiple usernames per device) — design in
   [`MULTI_ACCOUNT_PLAN.md`](MULTI_ACCOUNT_PLAN.md); not yet implemented.
 
-Next per the external review: **iOS at-rest store/history encryption** (pairs with
-the new master seed + Keychain), then the cheap batch (username grammar, CLI
-password, time-panic saturation, narrow the sealed-sender PQ claim), then **key
-transparency** (below).
+- **External-review hardening batch (done):** **iOS at-rest encryption** — the
+  identity store and chat history are now encrypted with a device-only Keychain key
+  (`StoreKey`; Argon2id in the Rust core for the store, ChaCha20-Poly1305 for the
+  history snapshot), auto-migrating legacy plaintext on next save; **username grammar**
+  (`logos_proto::validate_username`, enforced relay-side + pre-flighted client-side →
+  typed `InvalidUsername`); **CLI store password** (`--password`/`LOGOS_PASSWORD`, no
+  more hardcoded value); **time-panic saturation** (`now()` no longer `.unwrap()`s);
+  **sealed-sender claim narrowed** in UI copy (contents are PQ-hybrid; the sender-
+  hiding envelope is classical X25519).
+
+Remaining from the external review: **key transparency** (the big one — append-only
+verifiable log; do before any public "trust us" positioning), then an **external
+audit**. Hybridizing the sealed-sender envelope for PQ sender-metadata is also open.
 
 ## ▶︎ Resuming — immediate next steps (paused here)
 

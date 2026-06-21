@@ -33,6 +33,9 @@ pub enum LogosError {
     /// should ask the user to re-check the words.
     #[error("that recovery phrase isn't valid — check the words and try again")]
     InvalidRecoveryPhrase,
+    /// The chosen username breaks the grammar (length / characters / reserved).
+    #[error("{reason}")]
+    InvalidUsername { reason: String },
     /// Transport-level failure reaching the relay. Retryable.
     #[error("{msg}")]
     Network { msg: String },
@@ -49,6 +52,7 @@ impl From<logos_client::ClientError> for LogosError {
             C::NotRegistered { peer } => LogosError::NotRegistered { peer },
             C::UsernameTaken { username } => LogosError::UsernameTaken { username },
             C::InvalidRecoveryPhrase => LogosError::InvalidRecoveryPhrase,
+            C::InvalidUsername { reason } => LogosError::InvalidUsername { reason },
             C::Network(msg) => LogosError::Network { msg },
             C::Other(msg) => LogosError::Client { msg },
         }

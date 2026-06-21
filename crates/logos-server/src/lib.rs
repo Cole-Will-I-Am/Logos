@@ -23,9 +23,9 @@ use logos_identity::{
 };
 use logos_proto::{
     ack_signed_bytes, cert_signed_bytes, fetch_signed_bytes, mailbox_id, registration_signed_bytes,
-    replenish_signed_bytes, AckRequest, CertRequest, CertResponse, DirectoryResponse, FetchRequest,
-    FetchResponse, PostEnvelope, RegisterRequest, ReplenishRequest, ServerKeyResponse,
-    StoredEnvelope,
+    replenish_signed_bytes, validate_username, AckRequest, CertRequest, CertResponse,
+    DirectoryResponse, FetchRequest, FetchResponse, PostEnvelope, RegisterRequest,
+    ReplenishRequest, ServerKeyResponse, StoredEnvelope,
 };
 use logos_sealed::{issue_certificate, SealedEnvelope};
 use serde::{Deserialize, Serialize};
@@ -325,10 +325,12 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 fn now() -> u64 {
+    // Saturate to 0 if the clock is before the epoch rather than panicking — a
+    // panic here (also reached across the iOS FFI) would be app-hostile.
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 type ApiError = (StatusCode, String);
@@ -337,6 +339,9 @@ async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<StatusCode, ApiError> {
+    if let Err(reason) = validate_username(&req.username) {
+        return Err((StatusCode::BAD_REQUEST, reason.into()));
+    }
     let msg = registration_signed_bytes(&req.username, &req.identity);
     verify(&req.identity, &msg, &req.registration_sig).map_err(|_| {
         (

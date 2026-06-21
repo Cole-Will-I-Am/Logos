@@ -185,9 +185,9 @@ struct SettingsView: View {
             SettingsRow(icon: "lock.fill", title: "End-to-end encryption",
                         detail: "On for every conversation. Always.")
             SettingsRow(icon: "eye.slash.fill", title: "Sealed sender",
-                        detail: "Outgoing messages hide who sent them from the relay.")
+                        detail: "Hides who sent a message from the relay. Message contents are post-quantum encrypted; this sender-hiding layer itself is classical (X25519).")
             SettingsRow(icon: "iphone", title: "Stored on this device",
-                        detail: "Your keys never leave it — and we keep the store out of backups.")
+                        detail: "Your keys never leave it. The identity store and chat history are encrypted at rest with a device key (Keychain) and kept out of backups.")
         }
     }
 

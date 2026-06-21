@@ -11,6 +11,59 @@ use logos_sealed::{SealedEnvelope, SenderCertificate};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Canonical username grammar, shared by the relay and clients so they agree on
+/// what is registrable. Usernames are the public handle (no phone numbers), so we
+/// keep them deliberately narrow to limit homograph/confusable abuse: **lowercase
+/// ASCII**, must start with a letter, then letters / digits / underscore,
+/// `USERNAME_MIN`..=`USERNAME_MAX` characters. A richer free-text *display name*
+/// (separate from this canonical handle) is a future addition.
+pub const USERNAME_MIN: usize = 3;
+pub const USERNAME_MAX: usize = 32;
+
+const RESERVED_USERNAMES: &[&str] = &[
+    "admin",
+    "administrator",
+    "logos",
+    "system",
+    "support",
+    "root",
+    "relay",
+    "server",
+    "null",
+    "none",
+    "everyone",
+    "all",
+    "me",
+    "you",
+];
+
+/// Validate a canonical username. `Ok(())` if registrable, else a human-readable
+/// reason. Both the client (pre-flight, for a clear message) and the relay
+/// (authoritative) call this.
+pub fn validate_username(name: &str) -> Result<(), &'static str> {
+    let len = name.len(); // ASCII-only grammar ⇒ byte length == char count once charset passes
+    if len < USERNAME_MIN {
+        return Err("username is too short (minimum 3 characters)");
+    }
+    if len > USERNAME_MAX {
+        return Err("username is too long (maximum 32 characters)");
+    }
+    match name.chars().next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return Err("username must start with a lowercase letter (a–z)"),
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
+        return Err("username may only contain lowercase letters, digits, and underscores");
+    }
+    if RESERVED_USERNAMES.contains(&name) {
+        return Err("that username is reserved");
+    }
+    Ok(())
+}
+
 /// POST /v1/register — publish identity + prekeys to the directory.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RegisterRequest {
@@ -164,4 +217,32 @@ pub fn mailbox_id(recipient: &IdentityPublic) -> String {
     h.update(b"logos-mailbox-v1");
     h.update(recipient.encode());
     hex::encode(h.finalize())
+}
+
+#[cfg(test)]
+mod username_tests {
+    use super::validate_username;
+
+    #[test]
+    fn accepts_valid_usernames() {
+        for u in ["alice", "bob_42", "a1b", "x".repeat(32).as_str()] {
+            assert!(validate_username(u).is_ok(), "should accept {u}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_usernames() {
+        for u in [
+            "ab",            // too short
+            &"x".repeat(33), // too long
+            "Alice",         // uppercase
+            "1abc",          // must start with a letter
+            "a b",           // space
+            "a-b",           // hyphen not allowed
+            "naïve",         // non-ASCII
+            "admin",         // reserved
+        ] {
+            assert!(validate_username(u).is_err(), "should reject {u}");
+        }
+    }
 }

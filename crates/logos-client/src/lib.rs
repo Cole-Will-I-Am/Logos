@@ -19,8 +19,8 @@ use logos_identity::{
 use logos_pqxdh::{initiate, respond, InitialMessage};
 use logos_proto::{
     ack_signed_bytes, cert_signed_bytes, fetch_signed_bytes, mailbox_id, registration_signed_bytes,
-    AckRequest, CertRequest, CertResponse, DirectoryResponse, FetchRequest, FetchResponse,
-    OuterMessage, PostEnvelope, RegisterRequest, ServerKeyResponse,
+    validate_username, AckRequest, CertRequest, CertResponse, DirectoryResponse, FetchRequest,
+    FetchResponse, OuterMessage, PostEnvelope, RegisterRequest, ServerKeyResponse,
 };
 use logos_ratchet::RatchetState;
 use logos_sealed::{seal, unseal, SealedEnvelope, SenderCertificate};
@@ -64,6 +64,10 @@ pub enum ClientError {
     /// BIP39 checksum). Surfaced distinctly so restore can say "check the words".
     #[error("that recovery phrase isn't valid — check the words and try again")]
     InvalidRecoveryPhrase,
+    /// The chosen username doesn't match the canonical grammar. `reason` is a
+    /// human-readable explanation (length / charset / reserved).
+    #[error("{reason}")]
+    InvalidUsername { reason: String },
     /// Transport-level failure reaching the relay. Retryable.
     #[error("network error: {0}")]
     Network(String),
@@ -91,10 +95,12 @@ fn net(e: reqwest::Error) -> ClientError {
 }
 
 fn now() -> u64 {
+    // Saturate to 0 if the clock is before the epoch rather than panicking — a
+    // panic across the iOS FFI would crash the app.
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Blocking HTTP client with bounded connect/total timeouts so a slow or hung
@@ -340,6 +346,13 @@ impl Client {
         identity: IdentityKeyPair,
         seed: Option<[u8; 32]>,
     ) -> Result<Self> {
+        // Pre-flight the username locally so an invalid handle gives a precise
+        // message instead of a relay 400 (which would read as "can't reach").
+        if let Err(reason) = validate_username(username) {
+            return Err(ClientError::InvalidUsername {
+                reason: reason.to_string(),
+            });
+        }
         let (spk_pub, spk_sec) = new_signed_prekey(1, &identity);
         let mut otk_pub = Vec::new();
         let mut otk_sec = Vec::new();

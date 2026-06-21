@@ -115,9 +115,10 @@ final class Session: ObservableObject {
     private func loadIfExists() {
         guard FileManager.default.fileExists(atPath: storePath) else { return }
         do {
-            // password: nil → plaintext store + iOS FileProtection (unchanged behavior).
-            // At-rest encryption (Keychain-derived key + migration) is a tracked follow-up.
-            let c = try LogosClient.load(path: storePath, serverUrl: relayURL, password: nil)
+            // Encrypted at rest with a device-only Keychain key (Argon2id in the core).
+            // load() format-detects, so a legacy plaintext store still loads and migrates
+            // to encrypted on the next save.
+            let c = try LogosClient.load(path: storePath, serverUrl: relayURL, password: StoreKey.password())
             client = c
             username = c.username()
             mailboxId = c.mailbox()
@@ -134,7 +135,7 @@ final class Session: ObservableObject {
         let path = storePath
         Task {
             do {
-                let c = try await runBlocking { try LogosClient.create(path: path, serverUrl: relay, username: name, password: nil) }
+                let c = try await runBlocking { try LogosClient.create(path: path, serverUrl: relay, username: name, password: StoreKey.password()) }
                 client = c
                 username = c.username()
                 mailboxId = c.mailbox()
@@ -163,7 +164,7 @@ final class Session: ObservableObject {
             do {
                 let c = try await runBlocking {
                     try LogosClient.restore(path: path, serverUrl: relay, username: name,
-                                            recoveryPhrase: cleaned, password: nil)
+                                            recoveryPhrase: cleaned, password: StoreKey.password())
                 }
                 client = c
                 username = c.username()
@@ -364,9 +365,20 @@ final class Session: ObservableObject {
 
     private func loadHistory() {
         guard FileManager.default.fileExists(atPath: historyPath),
-              let data = try? Data(contentsOf: URL(fileURLWithPath: historyPath)),
-              let snap = try? JSONDecoder().decode(HistorySnapshot.self, from: data)
+              let raw = try? Data(contentsOf: URL(fileURLWithPath: historyPath))
         else { return }
+        // Decrypt the sealed snapshot; fall back to legacy plaintext JSON (which then
+        // migrates to sealed on the next persist()).
+        var legacyPlaintext = false
+        let data: Data
+        if let box = try? ChaChaPoly.SealedBox(combined: raw),
+           let opened = try? ChaChaPoly.open(box, using: StoreKey.symmetric()) {
+            data = opened
+        } else {
+            data = raw
+            legacyPlaintext = true
+        }
+        guard let snap = try? JSONDecoder().decode(HistorySnapshot.self, from: data) else { return }
         conversations = snap.conversations
         security = snap.security
         pinned = Set(snap.pinned ?? [])
@@ -386,6 +398,8 @@ final class Session: ObservableObject {
                 var fixed = m; fixed.status = .failed("Interrupted — tap to retry"); return fixed
             }
         }
+        // Upgrade a legacy plaintext history file to the sealed format immediately.
+        if legacyPlaintext { persist() }
     }
 
     private func persist() {
@@ -394,8 +408,11 @@ final class Session: ObservableObject {
                                    nicknames: nicknames)
         do {
             let data = try JSONEncoder().encode(snap)
+            // Seal at rest with the device Keychain key (defence in depth alongside
+            // iOS FileProtection); message text is no longer cleartext on disk.
+            let sealed = try ChaChaPoly.seal(data, using: StoreKey.symmetric()).combined
             var url = URL(fileURLWithPath: historyPath)
-            try data.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
+            try sealed.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
             var rv = URLResourceValues(); rv.isExcludedFromBackup = true
             try? url.setResourceValues(rv)
         } catch {
@@ -426,6 +443,8 @@ final class Session: ObservableObject {
             return .network("“\(username)” is already taken on this relay. Try a different username.")
         case .InvalidRecoveryPhrase:
             return .network("That recovery phrase isn’t valid — check the words and try again.")
+        case .InvalidUsername(let reason):
+            return .network(reason.prefix(1).uppercased() + reason.dropFirst() + ".")
         case .Network:
             return .network("Couldn’t reach the relay. We’ll keep this message ready to retry.")
         case .Client:
