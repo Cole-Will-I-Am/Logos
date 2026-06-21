@@ -28,7 +28,7 @@ struct SettingsView: View {
         .sheet(isPresented: $showMyQR) { myQRSheet }
         .sheet(isPresented: $showPhrase) { RecoveryPhraseSheet().environmentObject(session) }
         .alert("Start a new identity?", isPresented: $showNewIdentityConfirm) {
-            Button("Delete & start new", role: .destructive) { session.startNewIdentity() }
+            Button("Delete & start new", role: .destructive) { Task { await session.startNewIdentity() } }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This deletes your current identity and chats on this device and returns you to sign-up, where you can choose a new username. You can’t undo this unless you’ve saved your recovery phrase.")
@@ -97,7 +97,8 @@ struct SettingsView: View {
     private func applyNetwork() {
         guard networkChanged else { return }
         Haptic.tap()
-        session.switchRelay(to: targetRelay)
+        let target = targetRelay
+        Task { await session.switchRelay(to: target) }
         dismiss()
     }
     private func hostOf(_ s: String) -> String { URL(string: s)?.host ?? s }

@@ -21,9 +21,14 @@ enum StoreKey {
     private static func raw() -> Data {
         if let existing = load() { return existing }
         var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        // L4: a failed RNG must not yield a weak/zero key — fail closed.
+        let rng = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        precondition(rng == errSecSuccess, "SecRandomCopyBytes failed (\(rng)) — refusing to mint a weak store key")
         let data = Data(bytes)
-        save(data)
+        // L4: if the key can't be persisted, the next launch would mint a different
+        // key and the store would be unreadable — fail closed rather than continue.
+        let status = save(data)
+        precondition(status == errSecSuccess, "Keychain SecItemAdd failed (\(status)) — store key not persisted")
         return data
     }
 
@@ -32,6 +37,18 @@ enum StoreKey {
 
     /// Base64 form, passed as the Rust store passphrase.
     static func password() -> String { raw().base64EncodedString() }
+
+    /// Delete the device key so the next access mints a fresh one. Used when starting
+    /// a new identity, so any ciphertext that survived deletion becomes undecryptable
+    /// (red-team M2).
+    static func rotate() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
 
     private static func load() -> Data? {
         let query: [String: Any] = [
@@ -46,7 +63,8 @@ enum StoreKey {
         return out as? Data
     }
 
-    private static func save(_ data: Data) {
+    @discardableResult
+    private static func save(_ data: Data) -> OSStatus {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -56,6 +74,6 @@ enum StoreKey {
         var add = query
         add[kSecValueData as String] = data
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        SecItemAdd(add as CFDictionary, nil)
+        return SecItemAdd(add as CFDictionary, nil)
     }
 }

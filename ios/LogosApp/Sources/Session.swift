@@ -61,6 +61,10 @@ final class Session: ObservableObject {
     private let dir: URL
     private var pollTask: Task<Void, Never>?
     private var activePeer: String?   // the open chat, so its incoming msgs don't count as unread
+    /// Bumped on every identity transition (register/restore/switch/new). A poll
+    /// whose `recv()` was in flight across a transition checks this and discards its
+    /// results, so a torn-down identity's data can't be resurrected (red-team M2).
+    private var identityGeneration = 0
 
     // Store + history are scoped to the active relay: each relay (network) keeps its
     // own identity and chats, so switching networks is safe and reversible.
@@ -95,10 +99,13 @@ final class Session: ObservableObject {
     /// Switch the active relay (network). Each relay scopes its own identity + chats,
     /// so this loads the identity registered on `newURL` if one exists, or drops to
     /// onboarding to register on that network. No-op if unchanged.
-    func switchRelay(to newURL: String) {
+    func switchRelay(to newURL: String) async {
         let trimmed = newURL.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, trimmed != relayURL else { return }
-        pollTask?.cancel(); pollTask = nil
+        identityGeneration &+= 1
+        // Await the in-flight poll so a recv()+save() can't write the old relay's
+        // data into the new relay's store after we switch (red-team M2).
+        pollTask?.cancel(); await pollTask?.value; pollTask = nil
         client = nil
         username = nil; mailboxId = ""
         conversations = []; messages = [:]; security = [:]; lastError = nil
@@ -114,12 +121,16 @@ final class Session: ObservableObject {
     /// fresh one (on the same relay). Deletes the local store, history, and avatars
     /// for the active relay. Destructive and irreversible unless the user saved a
     /// recovery phrase first — the UI must confirm before calling this.
-    func startNewIdentity() {
-        pollTask?.cancel(); pollTask = nil
+    func startNewIdentity() async {
+        identityGeneration &+= 1
+        // Wait for any in-flight recv()+save() to finish BEFORE deleting, so a racing
+        // save can't re-create the store with the old identity's seed/history (M2).
+        pollTask?.cancel(); await pollTask?.value; pollTask = nil
         client = nil
         try? FileManager.default.removeItem(atPath: storePath)
         try? FileManager.default.removeItem(atPath: historyPath)
         try? FileManager.default.removeItem(at: avatarDir)
+        StoreKey.rotate() // re-mint the device key so any resurrected ciphertext is undecryptable
         username = nil; mailboxId = ""
         conversations = []; messages = [:]; security = [:]; lastError = nil
         online = true; lastSynced = nil; syncing = false
@@ -147,6 +158,7 @@ final class Session: ObservableObject {
     }
 
     func register(username name: String, relay: String) {
+        identityGeneration &+= 1
         relayURL = relay
         UserDefaults.standard.set(relay, forKey: "relayURL")
         let path = storePath
@@ -168,6 +180,7 @@ final class Session: ObservableObject {
     /// Re-derives the same keys and re-registers under `name` (reclaiming the
     /// username). Recovers identity + username only — not history or contacts.
     func restore(username name: String, phrase: String, relay: String) {
+        identityGeneration &+= 1
         relayURL = relay
         UserDefaults.standard.set(relay, forKey: "relayURL")
         let path = storePath
@@ -506,10 +519,14 @@ final class Session: ObservableObject {
 
     private func pollOnce() async {
         guard let client, !syncing else { return }
+        let gen = identityGeneration
         syncing = true
         defer { syncing = false }
         do {
             let incoming = try await runBlocking { try client.recv() }
+            // The identity was switched/torn down while recv() was in flight — discard
+            // its results so we don't resurrect a deleted identity's history (M2).
+            guard gen == identityGeneration, self.client != nil else { return }
             for m in incoming {
                 startConversation(with: m.from)
                 messages[m.from, default: []].append(
@@ -521,6 +538,7 @@ final class Session: ObservableObject {
             online = true
             lastSynced = Date()
         } catch {
+            guard gen == identityGeneration else { return }
             online = false
             lastError = friendly(error)
         }
