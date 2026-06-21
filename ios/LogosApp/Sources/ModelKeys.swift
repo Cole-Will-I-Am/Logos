@@ -70,6 +70,14 @@ enum AIConfig {
         set { d.set(newValue.trimmingCharacters(in: .whitespaces), forKey: "ai.assistantName") }
     }
 
+    /// Whether the user agreed to send recent chat context to a CLOUD provider when they
+    /// @mention the assistant inside a conversation. Asked once, then remembered (the
+    /// on-device provider never prompts). Mirrors the "Catch me up" consent boundary.
+    static var inChatCloudConsented: Bool {
+        get { d.bool(forKey: "ai.inChatCloudConsented") }
+        set { d.set(newValue, forKey: "ai.inChatCloudConsented") }
+    }
+
     /// The provider actually used: if nothing is set up but the device has a free
     /// on-device model, fall back to it — that's the free, private default.
     static var effectiveProvider: AIProvider {

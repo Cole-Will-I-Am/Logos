@@ -6,11 +6,19 @@ struct ChatView: View {
     @State private var draft = ""
     @State private var acknowledgedChange = false
     @State private var showCatchup = false
+    @AppStorage("ai.assistantName") private var assistantName = AIConfig.defaultAssistantName
+    @State private var showCloudConsent = false
+    @State private var pendingQuestion = ""
     @FocusState private var composerFocused: Bool
 
     private var msgs: [ChatMessage] { session.messages[peer] ?? [] }
     private var security: SessionSecurity { session.security(for: peer) }
     private var changedAndUnacknowledged: Bool { security == .identityChanged && !acknowledgedChange }
+    private var provider: AIProvider { AIConfig.effectiveProvider }
+    private var aiName: String {
+        let t = assistantName.trimmingCharacters(in: .whitespaces)
+        return t.isEmpty ? AIConfig.defaultAssistantName : t
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -49,6 +57,16 @@ struct ChatView: View {
             }
         }
         .sheet(isPresented: $showCatchup) { AICatchUpSheet(peer: peer).environmentObject(session) }
+        .alert("Use \(aiName) in this chat?", isPresented: $showCloudConsent) {
+            Button("Allow once") { session.mentionAI(in: peer, question: pendingQuestion) }
+            Button("Allow & don’t ask again") {
+                AIConfig.inChatCloudConsented = true
+                session.mentionAI(in: peer, question: pendingQuestion)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your recent messages in this chat will be sent to \(provider.label) to answer, leaving end-to-end encryption (the Logos relay still never sees them). On-device AI keeps everything private.")
+        }
     }
 
     // Tiny, quiet status under the title. Loud only when something is wrong.
@@ -77,6 +95,7 @@ struct ChatView: View {
                         MessageBubble(message: msg) { session.retry(msg.id, in: peer) }
                             .id(msg.id)
                     }
+                    if session.aiMentionPending.contains(peer) { TypingBubble().id("ai-typing") }
                 }
                 .padding(.horizontal, Space.md)
                 .padding(.vertical, Space.sm)
@@ -85,6 +104,11 @@ struct ChatView: View {
             .onChange(of: msgs.count) { _ in
                 guard let last = msgs.last else { return }
                 withAnimation(Motion.standard) { proxy.scrollTo(last.id, anchor: .bottom) }
+            }
+            .onChange(of: session.aiMentionPending) { _ in
+                if session.aiMentionPending.contains(peer) {
+                    withAnimation(Motion.standard) { proxy.scrollTo("ai-typing", anchor: .bottom) }
+                }
             }
             .onAppear {
                 if let last = msgs.last { proxy.scrollTo(last.id, anchor: .bottom) }
@@ -141,6 +165,7 @@ struct ChatView: View {
 
     private var composer: some View {
         VStack(spacing: 0) {
+            mentionSuggestion
             Divider().background(LColor.hairline)
             HStack(alignment: .bottom, spacing: Space.xs) {
                 Button { Haptic.tap() } label: {
@@ -164,6 +189,7 @@ struct ChatView: View {
                     guard !t.isEmpty else { return }
                     draft = ""; Haptic.send()
                     session.send(to: peer, text: t)
+                    maybeAskAI(t)
                 } label: {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 16, weight: .bold))
@@ -192,6 +218,74 @@ struct ChatView: View {
     private var canSend: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !changedAndUnacknowledged
     }
+
+    // MARK: - In-chat @mention
+
+    /// The text after the last "@" the user is currently typing (nil if none / spans a newline).
+    private var mentionFragment: String? {
+        guard let at = draft.lastIndex(of: "@") else { return nil }
+        let frag = String(draft[draft.index(after: at)...])
+        return frag.contains("\n") ? nil : frag
+    }
+    /// Show the autocomplete chip while "@<fragment>" is still a prefix of the name and
+    /// the mention isn't already complete. Hidden when no AI provider is set up.
+    private var showMentionSuggestion: Bool {
+        guard provider != .none, let frag = mentionFragment else { return false }
+        if Session.mentionsAI(draft, name: aiName) { return false }
+        return aiName.lowercased().hasPrefix(frag.lowercased())
+    }
+
+    @ViewBuilder private var mentionSuggestion: some View {
+        if showMentionSuggestion {
+            Button(action: insertMention) {
+                HStack(spacing: Space.sm) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(LColor.onGold)
+                        .frame(width: 26, height: 26).background(LColor.gold, in: Circle())
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(aiName).font(LFont.subhead.weight(.semibold)).foregroundStyle(LColor.ink)
+                        Text("Ask your AI here — both of you see the reply")
+                            .font(LFont.caption).foregroundStyle(LColor.inkTertiary)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.up.left.circle.fill")
+                        .font(.system(size: 18)).foregroundStyle(LColor.goldText)
+                }
+                .padding(.horizontal, Space.md).padding(.vertical, Space.xs)
+                .background(LColor.surface)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
+    private func insertMention() {
+        guard let at = draft.lastIndex(of: "@") else { return }
+        draft = String(draft[..<at]) + "@\(aiName) "
+        Haptic.tap()
+    }
+
+    /// If the just-sent message tags the assistant, generate an answer for the thread
+    /// (gated by cloud consent). On-device answers immediately; cloud asks once.
+    private func maybeAskAI(_ text: String) {
+        guard provider != .none, Session.mentionsAI(text, name: aiName) else { return }
+        let question = strippedQuestion(text)
+        if provider.isCloud && !AIConfig.inChatCloudConsented {
+            pendingQuestion = question
+            showCloudConsent = true
+        } else {
+            session.mentionAI(in: peer, question: question)
+        }
+    }
+    /// Drop the "@<name>" token so the model gets just the ask.
+    private func strippedQuestion(_ text: String) -> String {
+        guard let r = text.range(of: "@" + aiName, options: .caseInsensitive) else { return text }
+        var q = text
+        q.removeSubrange(r)
+        return q.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 // MARK: - Message bubble
@@ -203,15 +297,23 @@ struct MessageBubble: View {
     var showStatus = true
     let onRetry: () -> Void
 
+    private var isAI: Bool { message.aiAuthor != nil }
+
     var body: some View {
         HStack {
             if message.mine { Spacer(minLength: 48) }
             VStack(alignment: message.mine ? .trailing : .leading, spacing: 3) {
+                if let ai = message.aiAuthor {
+                    Label(ai, systemImage: "sparkles")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(LColor.goldText)
+                        .padding(.horizontal, 4)
+                }
                 Text(message.text)
                     .font(LFont.body)
-                    .foregroundStyle(message.mine ? LColor.bubbleMineText : LColor.ink)
+                    .foregroundStyle(isAI ? LColor.ink : (message.mine ? LColor.bubbleMineText : LColor.ink))
                     .padding(.horizontal, 13).padding(.vertical, 9)
-                    .background(message.mine ? LColor.bubbleMine : LColor.surfaceAlt)
+                    .background(isAI ? LColor.goldWash : (message.mine ? LColor.bubbleMine : LColor.surfaceAlt))
                     .clipShape(RoundedRectangle(cornerRadius: Radius.bubble, style: .continuous))
                     .textSelection(.enabled)
                 if message.mine && showStatus { statusRow }

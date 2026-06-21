@@ -158,6 +158,27 @@ enum AIClient {
         }
     }
 
+    /// Answer an in-chat @mention. The assistant is told it's helping inside a private
+    /// conversation between two people; the recent transcript is the context, and the
+    /// reply is posted for both to read. Reuses the one-shot `complete` path (works for
+    /// every provider, including on-device).
+    static func answerInChat(assistantName: String, meName: String, peerName: String,
+                             recent: [ChatMessage], question: String) async throws -> String {
+        let convo = recent
+            .map { ($0.aiAuthor ?? ($0.mine ? meName : peerName)) + ": " + $0.text }
+            .joined(separator: "\n")
+        let system = """
+        You are \(assistantName), an AI assistant helping inside a private, end-to-end-encrypted \
+        chat between \(meName) and \(peerName). \(meName) tagged you with @\(assistantName) to ask \
+        something, and your reply is posted into the conversation for both to read. Be helpful and \
+        concise, use the recent messages for context, and don't invent facts.
+        """
+        let user = convo.isEmpty
+            ? question
+            : "Recent conversation:\n\(convo)\n\n\(meName) asked you: \(question)"
+        return try await complete(system: system, user: user)
+    }
+
     /// Merge adjacent same-role turns. A failed assistant reply leaves the user's next
     /// message as a second user turn in a row, which strict providers (Anthropic)
     /// reject — coalesce so the messages array always alternates cleanly.

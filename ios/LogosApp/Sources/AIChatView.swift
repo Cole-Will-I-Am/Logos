@@ -192,7 +192,8 @@ struct AIChatView: View {
 }
 
 /// Three-dot "assistant is thinking" indicator, styled like an inbound bubble.
-private struct TypingBubble: View {
+/// Shared by the dedicated AI chat and the in-chat @mention flow.
+struct TypingBubble: View {
     @State private var lit = 0
 
     var body: some View {

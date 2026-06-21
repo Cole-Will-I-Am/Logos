@@ -26,6 +26,11 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     let mine: Bool
     var status: MessageStatus
     let at: Date           // send/receipt time (UI-side; IncomingMessage carries no timestamp yet)
+    /// Set when this bubble is an in-chat AI answer the user summoned with @mention —
+    /// holds the assistant's display name so it renders as the assistant, not "you".
+    /// Local-only (the wire carries the attribution in the message text); optional so
+    /// existing persisted history decodes with `nil`.
+    var aiAuthor: String? = nil
 }
 
 /// Owns the Rust `LogosClient` and drives the UI. `LogosClient` calls are blocking
@@ -368,6 +373,8 @@ final class Session: ObservableObject {
     @Published var aiPending = false
     /// Last AI failure, surfaced inline in the AI chat. Cleared on the next send.
     @Published var aiError: String?
+    /// Peers with an in-chat @mention answer currently being generated (typing dots).
+    @Published var aiMentionPending: Set<String> = []
 
     var aiMessages: [ChatMessage] { messages[Self.aiPeer] ?? [] }
 
@@ -403,6 +410,53 @@ final class Session: ObservableObject {
         messages[Self.aiPeer] = nil
         aiError = nil
         persist()
+    }
+
+    // MARK: - In-chat @mention ("@<assistant> …" inside a 1:1 thread)
+
+    /// Does `text` tag the assistant by name? Matches "@<assistant name>"
+    /// case-insensitively (the name may contain spaces).
+    static func mentionsAI(_ text: String, name: String) -> Bool {
+        let n = name.trimmingCharacters(in: .whitespaces)
+        guard !n.isEmpty else { return false }
+        return text.lowercased().contains("@" + n.lowercased())
+    }
+
+    /// The user tagged the assistant inside their chat with `peer`. Generate an answer
+    /// from the recent thread and post it into the conversation for BOTH people to see.
+    /// The answer rides the normal E2EE wire (labeled with the assistant name); the
+    /// relay only ever sees ciphertext. Caller handles cloud consent before calling.
+    func mentionAI(in peer: String, question: String) {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard client != nil, !q.isEmpty, !aiMentionPending.contains(peer) else { return }
+        aiMentionPending.insert(peer)
+        let name = AIConfig.assistantName
+        let me = username ?? "Me"
+        let peerName = displayName(for: peer)
+        let recent = Array((messages[peer] ?? []).suffix(40))
+        Task {
+            do {
+                let answer = try await AIClient.answerInChat(
+                    assistantName: name, meName: me, peerName: peerName, recent: recent, question: q)
+                aiMentionPending.remove(peer)
+                sendAIAnswer(to: peer, name: name, answer: answer)
+            } catch {
+                aiMentionPending.remove(peer)
+                lastError = (error as? AIError)?.errorDescription ?? error.localizedDescription
+                Haptic.warn()
+            }
+        }
+    }
+
+    /// Post an AI answer into a real peer thread. Locally it's an assistant-attributed
+    /// bubble; on the wire it's a normal E2EE message labeled with the assistant name
+    /// (the AI has no network identity, so the label travels in the text).
+    private func sendAIAnswer(to peer: String, name: String, answer: String) {
+        guard client != nil else { return }
+        let wire = "✦ \(name): \(answer)"
+        let msg = ChatMessage(text: answer, mine: true, status: .sending, at: Date(), aiAuthor: name)
+        messages[peer, default: []].append(msg)
+        deliver(msg.id, to: peer, text: wire)
     }
 
     // MARK: - Contact verification
