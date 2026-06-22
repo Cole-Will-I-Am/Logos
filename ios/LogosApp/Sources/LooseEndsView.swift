@@ -10,7 +10,7 @@ import SwiftUI
 
 // MARK: - Model
 
-enum LooseEndKind: String {
+enum LooseEndKind: String, Codable {
     case question, promise, deadline
 
     var label: String {
@@ -36,11 +36,14 @@ enum LooseEndKind: String {
     }
 }
 
-struct LooseEnd: Identifiable, Equatable {
+struct LooseEnd: Identifiable, Equatable, Codable {
     let id = UUID()
     let peer: String
     let kind: LooseEndKind
     let text: String
+    /// Stable content key for resolve-memory — matches the same item across rescans
+    /// even though `id` is fresh each time. (Computed, so it's not persisted.)
+    var key: String { "\(peer.lowercased())|\(kind.rawValue)|\(text.lowercased())" }
 }
 
 // MARK: - Engine
@@ -130,12 +133,10 @@ struct LooseEndsView: View {
 
     private enum Phase { case idle, running, done }
     @State private var phase: Phase = .idle
-    @State private var items: [LooseEnd] = []
-    @State private var dismissed: Set<UUID> = []
     @State private var errorText: String?
 
     private var provider: AIProvider { AIConfig.effectiveProvider }
-    private var visible: [LooseEnd] { items.filter { !dismissed.contains($0.id) } }
+    private var visible: [LooseEnd] { session.looseEnds }
 
     var body: some View {
         ScrollView {
@@ -152,6 +153,7 @@ struct LooseEndsView: View {
         .logosBackground(watermark: true)
         .navigationTitle("Loose ends")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { if phase == .idle && !session.looseEnds.isEmpty { phase = .done } }
     }
 
     // MARK: Idle
@@ -225,13 +227,16 @@ struct LooseEndsView: View {
                     Text(visible.count == 1 ? "1 loose end" : "\(visible.count) loose ends")
                         .font(LFont.subhead.weight(.medium)).foregroundStyle(LColor.inkSecondary)
                     Spacer()
+                    if let at = session.looseEndsScannedAt {
+                        Text(at, style: .relative).font(LFont.caption).foregroundStyle(LColor.inkTertiary)
+                    }
                 }
                 .padding(.horizontal, Space.xxs)
 
                 ForEach(visible) { item in
                     LooseEndCard(item: item) {
                         Haptic.tap()
-                        withAnimation(Motion.standard) { dismissed.insert(item.id) }
+                        withAnimation(Motion.standard) { session.resolveLooseEnd(item) }
                     }
                 }
 
@@ -246,7 +251,7 @@ struct LooseEndsView: View {
     }
 
     private var rescanButton: some View {
-        Button { Task { dismissed = []; await run() } } label: {
+        Button { Task { await run() } } label: {
             Label("Scan again", systemImage: "arrow.clockwise").frame(maxWidth: .infinity)
         }
         .buttonStyle(.logosSecondary)
@@ -258,9 +263,9 @@ struct LooseEndsView: View {
         phase = .running
         errorText = nil
         do {
-            items = try await LooseEnds.scan(session)
+            let found = try await LooseEnds.scan(session)
+            session.recordLooseEnds(found)          // persisted, sealed at rest
         } catch {
-            items = []
             errorText = (error as? AIError)?.errorDescription ?? error.localizedDescription
         }
         phase = .done

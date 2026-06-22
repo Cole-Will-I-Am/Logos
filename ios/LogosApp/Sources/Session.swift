@@ -97,6 +97,7 @@ final class Session: ObservableObject {
     // own identity and chats, so switching networks is safe and reversible.
     private var storePath: String { path(prefix: "logos-store") }
     private var historyPath: String { path(prefix: "logos-history") }
+    private var looseEndsPath: String { path(prefix: "logos-looseends") }
 
     private func path(prefix: String) -> String {
         let name = relayURL == Self.defaultRelay ? "\(prefix).json"
@@ -120,6 +121,7 @@ final class Session: ObservableObject {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         relayURL = UserDefaults.standard.string(forKey: "relayURL") ?? Self.defaultRelay
         loadHistory()
+        loadLooseEnds()
         loadIfExists()
     }
 
@@ -138,9 +140,11 @@ final class Session: ObservableObject {
         conversations = []; contacts = []; messages = [:]; security = [:]; lastError = nil
         online = true; lastSynced = nil; syncing = false
         pinned = []; archived = []; unread = [:]; nicknames = [:]; avatars = [:]
+        looseEnds = []; looseEndsResolved = []; looseEndsScannedAt = nil
         relayURL = trimmed
         UserDefaults.standard.set(trimmed, forKey: "relayURL")
         loadHistory()
+        loadLooseEnds()
         loadIfExists()
     }
 
@@ -156,12 +160,14 @@ final class Session: ObservableObject {
         client = nil
         try? FileManager.default.removeItem(atPath: storePath)
         try? FileManager.default.removeItem(atPath: historyPath)
+        try? FileManager.default.removeItem(atPath: looseEndsPath)
         try? FileManager.default.removeItem(at: avatarDir)
         StoreKey.rotate() // re-mint the device key so any resurrected ciphertext is undecryptable
         username = nil; mailboxId = ""
         conversations = []; contacts = []; messages = [:]; security = [:]; lastError = nil
         online = true; lastSynced = nil; syncing = false
         pinned = []; archived = []; unread = [:]; nicknames = [:]; avatars = [:]
+        looseEnds = []; looseEndsResolved = []; looseEndsScannedAt = nil
         activePeer = nil
     }
 
@@ -412,6 +418,12 @@ final class Session: ObservableObject {
     /// Groups this identity belongs to (mirrors the Rust store; refreshed each poll).
     @Published var groups: [GroupInfo] = []
     private var groupsSig = ""
+    /// Loose Ends (AI-extracted) — persisted, sealed at rest with the same device key as
+    /// history. `looseEndsResolved` holds content keys the user dismissed, so a rescan
+    /// won't resurface them.
+    @Published var looseEnds: [LooseEnd] = []
+    @Published var looseEndsResolved: Set<String> = []
+    @Published var looseEndsScannedAt: Date?
 
     var aiMessages: [ChatMessage] { messages[Self.aiPeer] ?? [] }
 
@@ -852,6 +864,54 @@ final class Session: ObservableObject {
         } catch {
             // Best-effort: never crash the app over history persistence.
         }
+    }
+
+    // MARK: - Loose Ends persistence (sealed at rest, like history)
+
+    private struct LooseEndsSnapshot: Codable {
+        var ends: [LooseEnd]
+        var resolved: [String]
+        var scannedAt: Date?
+    }
+
+    /// Replace the list with a fresh scan, dropping anything already marked resolved.
+    func recordLooseEnds(_ ends: [LooseEnd]) {
+        looseEnds = ends.filter { !looseEndsResolved.contains($0.key) }
+        looseEndsScannedAt = Date()
+        saveLooseEnds()
+    }
+
+    /// Mark one handled: remove it now and remember it so a rescan won't bring it back.
+    func resolveLooseEnd(_ end: LooseEnd) {
+        looseEndsResolved.insert(end.key)
+        looseEnds.removeAll { $0.id == end.id }
+        saveLooseEnds()
+    }
+
+    private func saveLooseEnds() {
+        let snap = LooseEndsSnapshot(ends: looseEnds, resolved: Array(looseEndsResolved), scannedAt: looseEndsScannedAt)
+        do {
+            let data = try JSONEncoder().encode(snap)
+            let sealed = try ChaChaPoly.seal(data, using: StoreKey.symmetric()).combined
+            var url = URL(fileURLWithPath: looseEndsPath)
+            try sealed.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
+            var rv = URLResourceValues(); rv.isExcludedFromBackup = true
+            try? url.setResourceValues(rv)
+        } catch {
+            // Best-effort: loose ends are recomputable, never crash over them.
+        }
+    }
+
+    private func loadLooseEnds() {
+        guard FileManager.default.fileExists(atPath: looseEndsPath),
+              let raw = try? Data(contentsOf: URL(fileURLWithPath: looseEndsPath)),
+              let box = try? ChaChaPoly.SealedBox(combined: raw),
+              let data = try? ChaChaPoly.open(box, using: StoreKey.symmetric()),
+              let snap = try? JSONDecoder().decode(LooseEndsSnapshot.self, from: data)
+        else { return }
+        looseEnds = snap.ends
+        looseEndsResolved = Set(snap.resolved)
+        looseEndsScannedAt = snap.scannedAt
     }
 
     // MARK: - Error classification (typed — driven by the FFI's LogosError)

@@ -132,6 +132,15 @@ struct RelayVisibilityView: View {
                              detail: "Safety numbers are compared on your devices. Verification status, nicknames, and photos never leave this phone.")
             }
             .cardStyle(padding: 0)
+            NavigationLink { SealedSenderView() } label: {
+                HStack(spacing: 4) {
+                    Text("How sealed sender hides who you are").font(LFont.footnote.weight(.medium))
+                    Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundStyle(LColor.goldText)
+                .padding(.leading, Space.xs).padding(.top, 2)
+            }
+            .buttonStyle(.plain)
         }
     }
 
