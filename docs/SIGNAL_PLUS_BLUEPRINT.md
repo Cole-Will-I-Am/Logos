@@ -53,12 +53,13 @@ Already implemented or partially implemented:
   verification** (real safety numbers, QR scan-to-verify, reinstall recovery);
   on-device chat-history persistence; relay/connectivity status; inbox (search,
   unread, pin, archive); local contact photos/nicknames; no-Mac TestFlight pipeline.
+- Encrypted-at-rest client store (replaced the plaintext JSON store).
+- Small E2EE group chats in the iOS UI (sender-key style).
 
 Known blockers that prevent real-world security claims:
 
 - No external audit.
 - No key transparency.
-- Client store is still plaintext JSON.
 - Relay store is still not production-grade durable storage.
 - Recipient mailbox and timing metadata remain visible to the relay.
 - Mailbox IDs are stable rather than blinded/rotating.
@@ -66,8 +67,8 @@ Known blockers that prevent real-world security claims:
 - Directory fetches can drain one-time prekeys.
 - No prekey replenishment path.
 - No multi-device.
-- No groups.
-- No backup/recovery story.
+- No message-history backup story (identity recovery via recovery phrase exists,
+  but chat history is not backed up/restored).
 - No continuous post-quantum ratchet.
 - Sealed sender metadata protection is classical X25519, not PQ-hybrid.
 - Full zeroization is incomplete.

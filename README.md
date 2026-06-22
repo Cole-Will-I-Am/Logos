@@ -19,9 +19,17 @@ Built on audited primitive crates (`*-dalek`, RustCrypto `ml-kem`,
 published Signal **Double Ratchet** and **PQXDH** specifications. We reuse
 audited *primitives*; we do not invent cryptography.
 
-## Status: working 1:1 E2EE walking skeleton ✅
+## Status: live on TestFlight (v0.1.28) → App Store submission prep
 
-`cargo test --workspace` → **33 passing**, including an end-to-end integration
+A full SwiftUI iOS app ships from this core on TestFlight (latest **v0.1.28**) and
+is now in App Store submission prep. Beyond 1:1 E2EE it has **E2EE group chats**,
+**photo/file sharing**, identity **recovery phrases**, **at-rest encryption**, a
+**private AI layer** (BYOK + on-device, dedicated assistant chat + @mention +
+Loose Ends), and in-app **relay-transparency** panels. The relay runs publicly at
+`relay.manticthink.com`. (Still EXPERIMENTAL/UNAUDITED per the banner above — the
+external audit gates any real-world use.)
+
+`cargo test --workspace` → **56 passing**, including an end-to-end integration
 test where two clients exchange encrypted messages through a live relay, plus
 security regression tests (replay/redelivery, corrupt-store, key-persistence).
 
@@ -34,7 +42,7 @@ security regression tests (replay/redelivery, corrupt-store, key-persistence).
 | `logos-proto` | Shared wire types + endpoint contract |
 | `logos-server` | Minimal-trust relay (axum): public-key directory, opaque mailbox queue, **authenticated fetch + ACK-based deletion**, sealed-sender cert issuance |
 | `logos-client` | Sync, FFI-friendly client engine: register / send / recv; file-backed session store |
-| `logos-cli` | `logos` dev binary: `register` / `send` / `recv` / `whoami` |
+| `logos-cli` | `logos` dev binary (`register` / `send` / `recv` / `whoami`) + `logos-echo` test bot (echoes messages — a round-trip / App Review test buddy) |
 
 The relay never sees message plaintext, and sealed sender keeps it from learning
 who sent a delivered message. Mailbox **fetch is authenticated** (the caller
@@ -70,12 +78,12 @@ async crossing the FFI boundary; the relay stays server-side Rust.
 - `crates/logos-ffi` — UniFFI wrapper (`LogosClient` / `IncomingMessage` /
   `LogosError`); compiles + Swift bindings generate on Linux (✅ verified).
 - `ios/LogosKit` — SwiftPM package over the generated binding + xcframework.
-- `ios/LogosApp` — SwiftUI app (onboarding → conversations → chat → settings).
+- `ios/LogosApp` — SwiftUI app (onboarding · conversations · 1:1 + group chat · contacts/verify · dedicated AI chat · settings · relay-transparency panels).
 - `scripts/build-ios.sh` + `.github/workflows/ios.yml` — build the xcframework and
   compile the app on a macOS CI runner (no local Mac needed).
 
-See [`ios/README.md`](ios/README.md). Status is tracked in
-[`docs/ROADMAP.md`](docs/ROADMAP.md) (P2).
+See [`ios/README.md`](ios/README.md). Full phase status is tracked in
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 > Note on reproducible builds: per the design blueprint, App Store binaries can't
 > be bit-for-bit reproduced (Apple re-signs/encrypts), so iOS will lean on the
@@ -84,7 +92,7 @@ See [`ios/README.md`](ios/README.md). Status is tracked in
 ## Build & test
 
 ```sh
-cargo test --workspace        # 33 tests
+cargo test --workspace        # 56 tests
 cargo clippy --workspace --all-targets
 cargo fmt --check
 ```
@@ -92,13 +100,15 @@ cargo fmt --check
 ## Roadmap
 
 Done: crypto core (identity / PQXDH / ratchet / sealed) · relay + client + CLI ·
-end-to-end test.
+end-to-end test · `logos-ffi` (UniFFI) + iOS SwiftUI app on TestFlight · at-rest
+encryption (device Keychain key) · persistent relay · recovery phrases · E2EE
+group chats (sender-key v1, in the UI) · BYOK + on-device AI layer.
 
-Next: `logos-ffi` (UniFFI) + iOS SwiftUI app · persistent relay store (redb) +
-TTL sweep · encryption-at-rest for the client store (Argon2id) · **key
-transparency** log + auditing · MLS groups · mixnet/onion transport ·
-multi-device · backups/recovery · abuse defenses · **external security audit**
-(gating any real use).
+Next: **key transparency** log + auditing (removes the relay as cert authority —
+the big one) · **MLS groups** (openmls) · on-device semantic search/memory ·
+persistent relay store (redb) + TTL sweep · mixnet/onion transport · multi-device
+· chat-history backup · abuse defenses · **external security audit** (gating any
+real use).
 
 ## Design docs
 

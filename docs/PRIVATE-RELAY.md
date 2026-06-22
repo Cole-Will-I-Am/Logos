@@ -48,7 +48,7 @@ private CA / self-managed TLS that your devices trust.
 
 ## Priority / roadmap
 
-1. **At-rest encryption** of the on-device store (cleartext today) — do this first.
+1. **At-rest encryption** of the on-device store — ✅ done (stores are encrypted at rest).
 2. **Private Relay** (this feature).
 3. **Multi-relay presence** (be reachable on public *and* private at once) — later.
 4. **True peer-to-peer** — not a core promise (impractical on iOS for the reasons above).

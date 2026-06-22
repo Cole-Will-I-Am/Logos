@@ -15,9 +15,12 @@ logic lives in Swift.** The core is exposed via UniFFI (`crates/logos-ffi`).
   `Sources/LogosKit/LogosKit.swift`; the generated binding
   (`Sources/LogosKit/Generated/logos_ffi.swift`) and `LogosFFI.xcframework` are
   produced by the build script (gitignored).
-- `ios/LogosApp/` — the SwiftUI app: `project.yml` (XcodeGen) + `Sources/`
-  (Onboarding → Conversations → Chat → Settings; polling `recv()` off-main).
-  Depends on the local `LogosKit` package.
+- `ios/LogosApp/` — the SwiftUI app: `project.yml` (XcodeGen) + `Sources/`.
+  Screens now cover Onboarding → Conversations → Chat → Settings plus identity
+  Verify, Contacts, recovery phrase, a dedicated AI chat (BYOK + on-device, with
+  `@mention` + Loose Ends), E2EE group chats, photo/file sharing, and "what the
+  relay sees" transparency panels (polling `recv()` off-main). Depends on the
+  local `LogosKit` package.
 
 ## Build & run (on macOS)
 
@@ -33,7 +36,8 @@ its binary target.
 ## Swift API (generated)
 
 ```swift
-let client = try LogosClient.create(path: storePath, serverUrl: relay, username: "alice")
+// `password` wraps the at-rest store (Argon2id); pass nil only in test/dev.
+let client = try LogosClient.create(path: storePath, serverUrl: relay, username: "alice", password: passphrase)
 try client.send(to: "bob", message: "hello")
 let msgs = try client.recv()   // [IncomingMessage(from:text:)]
 ```
@@ -42,6 +46,7 @@ let msgs = try client.recv()   // [IncomingMessage(from:text:)]
 
 - `logos-ffi` + binding generation: ✅ verified on Linux.
 - xcframework + app build + TestFlight: macOS/CI (Xcode required).
+- Live on TestFlight (latest v0.1.28); App Store submission in prep.
 - App Store IPAs are **not** bit-for-bit reproducible (Apple re-signs) — we rely on
   the open Rust core + binary transparency, per the design blueprint.
 - EXPERIMENTAL / UNAUDITED — see repo root.

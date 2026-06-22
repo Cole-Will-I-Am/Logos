@@ -71,8 +71,8 @@ This file tracks implementation status for each workstream item in
 | Item | Status | Note | Commit(s) |
 |------|--------|------|-----------|
 | Multi-device | TODO | | |
-| Groups / MLS | PARTIAL | E2EE **sender-key v1** core shipped — P4.0a static + P4.0b membership/**rekey-on-removal** (`logos-ratchet::senderkey`; see `GROUP_CHAT_PLAN.md`). iOS group UI (P4.0c) + MLS/`openmls` (P4.1) TODO. Adversarially reviewed; v1 limitations documented. | main (0.1.18) |
-| Attachments | TODO | | |
+| Groups / MLS | PARTIAL | E2EE **sender-key v1** core shipped — P4.0a static + P4.0b membership/**rekey-on-removal** (`logos-ratchet::senderkey`; see `GROUP_CHAT_PLAN.md`). **iOS group UI (P4.0c) SHIPPED** (group FFI + SwiftUI create-group/group-chat/member-list/admin controls). Only MLS/`openmls` (P4.1) remains TODO. Adversarially reviewed; v1 limitations documented. | main (0.1.25) |
+| Attachments | DONE | Photo + file sharing shipped. | main (0.1.22) |
 | Backups/recovery | TODO | | |
 | Push notification hardening | TODO | | |
 | Calls | TODO | | |

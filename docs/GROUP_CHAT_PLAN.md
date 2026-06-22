@@ -1,7 +1,9 @@
 # Group chat plan (E2EE groups)
 
-EXPERIMENTAL — design doc, not yet implemented. This is roadmap **P4** (blueprint
-Workstream H). It defines how Logos adds **end-to-end-encrypted** group chats with a
+EXPERIMENTAL — sender-key v1 (P4.0a/b/c) is implemented and shipped (Rust core + FFI +
+iOS UI, 0.1.25); MLS (P4.1) remains design-only. Logos stays UNAUDITED — this is not a
+security claim. This is roadmap **P4** (blueprint Workstream H). It defines how Logos
+adds **end-to-end-encrypted** group chats with a
 Telegram-*like* experience (create a group, member list, admins, name/photo) — but,
 unlike Telegram, the relay can never read group messages.
 
@@ -127,7 +129,8 @@ Be explicit in-product that v1 is small-group-oriented.
    store, create/send/recv for a fixed-membership group (no add/remove). Per-member
    posting. Rust tests + a CLI group demo.
 2. **P4.0b — membership:** add/remove with rekey-on-removal, admins, invites.
-3. **P4.0c — iOS UI:** create/group-chat/member-list/admin, contacts as the picker.
+3. **P4.0c — iOS UI** ✅ **SHIPPED (0.1.25):** create/group-chat/member-list/admin,
+   contacts as the picker.
 4. **P4.1 — MLS migration:** replace the sender-key core with `openmls`; relay becomes an
    ordered delivery service; migration path for existing groups.
 5. **Cross-cutting:** key transparency (member verification), P5 metadata mitigations.
@@ -142,7 +145,7 @@ Be explicit in-product that v1 is small-group-oriented.
 - Whether to require all members verified before sensitive use (suggest: warn, don't
   block, until key transparency).
 
-## Implemented status (P4.0a + P4.0b)
+## Implemented status (P4.0a + P4.0b + P4.0c)
 
 P4.0a (static group: create/send/recv) and P4.0b (membership: add/remove with
 rekey-on-removal, admins, rename) are implemented in `logos-ratchet::senderkey`,
@@ -155,6 +158,14 @@ replies over the established session) to avoid simultaneous pairwise initiation,
 out-of-order pending-key buffer. Membership changes are admin-issued, **epoch**-versioned
 `GroupUpdate`s; sender keys carry a **generation** so a rekey REPLACES (rather than is
 ignored as a duplicate). Adversarially reviewed; the fixes from that review are applied.
+
+**P4.0c (iOS UI) shipped in 0.1.25.** The group core is exposed over the FFI
+(`create_group` / `send_group` / `add_member` / `remove_member` / `rename_group` /
+`groups` / `group_members`, plus `IncomingMessage.group`) and surfaced in SwiftUI: a
+create-group screen (contacts picker), a group chat view (per-message sender name), and
+a member list with admin controls (add/remove/rename). Group chat is no longer UI-less —
+it ships in the app. Logos remains **EXPERIMENTAL and UNAUDITED**; this is not a security
+claim.
 
 ## Known limitations (sender-key v1) — accepted for now, fix later
 

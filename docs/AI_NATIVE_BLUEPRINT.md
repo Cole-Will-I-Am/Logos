@@ -163,10 +163,10 @@ I know you / Based on your relationship / Predicted emotional state."
 
 | AI phase | Goal | Depends on | Status |
 |---|---|---|---|
-| **AI-0 — BYOK foundation** | Keychain key store + provider clients (Anthropic/OpenAI/Ollama, device→provider direct) + Settings UI + consent/preview + a first feature (**1:1 catch-up summary**) + **on-device default** (Apple Foundation Models) | L1 (done) | ✅ done (0.1.16/0.1.17) |
-| **AI-1 — Local comprehension** | on-device embeddings index · grounded semantic search (source-cited) · action/mention extraction · voice-note summary | AI-0 | ⏳ |
+| **AI-0 — BYOK foundation** | Keychain key store + provider clients (Anthropic/OpenAI/Ollama, device→provider direct) + Settings UI + consent/preview + a first feature (**1:1 catch-up summary**) + **on-device default** (Apple Foundation Models) | L1 (done) | ✅ done (0.1.16/0.1.17). Extended since: **dedicated nameable AI assistant chat** (0.1.19), **in-chat @mention** of the assistant (0.1.20/0.1.21), **AI markdown rendering** (0.1.24). |
+| **AI-1 — Local comprehension** | on-device embeddings index · grounded semantic search (source-cited) · action/mention extraction · voice-note summary | AI-0 | ⏳ — first on-device slice shipped: **Loose Ends** (unanswered questions / promises / time-sensitive items, 0.1.26; **v2 persisted + encrypted** 0.1.27). Embeddings index, grounded semantic search, and memory still planned. |
 | **AI-2 — Memory** | personal/per-contact memory (editable, deletable, source-backed) · AI privacy dashboard per chat | AI-1 | ⏳ |
-| **AI-3 — Group catch-up** | the flagship wedge at group scale | [P4 groups](GROUP_CHAT_PLAN.md) core ✅ (P4.0a/b; needs P4.0c UI) + AI-1 | ⏳ |
+| **AI-3 — Group catch-up** | the flagship wedge at group scale | [P4 groups](GROUP_CHAT_PLAN.md) core ✅ (P4.0a/b + **P4.0c UI**, 0.1.25) + AI-1 | ⏳ |
 | **AI-4 — Planning cards** | detect planning intent → structured plan/poll cards · calendar-read suggestions · manual approval | AI-2 | ⏳ |
 | **AI-5 — Permissioned agents** | capability system + audit log + biometric-gated actions | AI-4 | ⏳ |
 | **AI-6 — Shared agent protocol / multimodal** | inter-agent negotiation (minimal constraints) · translation · call summaries — heavily gated | AI-5 | ⏳ (creep risk; defer) |
