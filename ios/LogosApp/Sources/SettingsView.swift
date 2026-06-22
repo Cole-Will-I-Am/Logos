@@ -254,10 +254,6 @@ struct SettingsView: View {
 
     private var aboutSection: some View {
         VStack(spacing: Space.md) {
-            LBanner(tone: .caution, icon: "flask.fill",
-                    title: "Experimental & unaudited",
-                    message: "Logos hasn’t been independently security audited. Don’t use it for anything you genuinely need to keep secret.")
-
             Text("Logos · v\(appVersion)")
                 .font(LFont.caption).foregroundStyle(LColor.inkTertiary)
         }

@@ -7,7 +7,6 @@ struct ConversationsView: View {
     @State private var showCompose = false
     @State private var showNewGroup = false
     @State private var showContacts = false
-    @State private var showExperimental = true
     @State private var showArchived = false
     @State private var query = ""
 
@@ -22,11 +21,20 @@ struct ConversationsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $query, prompt: "Search chats")
             .safeAreaInset(edge: .top) {
-                if !session.online && session.username != nil {
-                    OfflineBanner { session.syncNow() }
+                VStack(spacing: Space.xs) {
+                    if !session.online && session.username != nil {
+                        OfflineBanner { session.syncNow() }
+                    }
+                    if let err = session.lastError {
+                        LBanner(tone: .danger, icon: "exclamationmark.triangle.fill",
+                                title: "Something went wrong", message: err,
+                                actionTitle: "Dismiss", action: { session.clearError() })
+                            .padding(.horizontal, Space.md)
+                    }
                 }
             }
             .animation(Motion.standard, value: session.online)
+            .animation(Motion.standard, value: session.lastError)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     NavigationLink { SettingsView() } label: {
@@ -91,7 +99,6 @@ struct ConversationsView: View {
     @ViewBuilder private var content: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                if showExperimental && query.isEmpty { experimentalBanner }
                 if !session.conversations.isEmpty && query.isEmpty { looseEndsEntry }
                 if matchesAIRow { aiRow }
                 ForEach(visibleGroups, id: \.id) { groupRow($0) }
@@ -144,15 +151,6 @@ struct ConversationsView: View {
         NavigationLink { LooseEndsView() } label: { LooseEndsInboxRow() }
             .buttonStyle(.plain)
         Divider().background(LColor.hairline).padding(.leading, 78)
-    }
-
-    private var experimentalBanner: some View {
-        LBanner(tone: .neutral, icon: "flask.fill",
-                title: "Experimental build",
-                message: "Not security audited. Fine to explore — don’t trust it with real secrets yet.",
-                actionTitle: "Dismiss",
-                action: { withAnimation(Motion.standard) { showExperimental = false } })
-        .padding(.horizontal, Space.md).padding(.top, Space.sm)
     }
 
     @ViewBuilder private func row(_ peer: String) -> some View {

@@ -75,15 +75,6 @@ struct OnboardingView: View {
                 // Advanced (relay) — hidden by default
                 advanced
 
-                // Honest experimental footer
-                HStack(spacing: 6) {
-                    Image(systemName: "flask.fill").font(.system(size: 11))
-                    Text("Experimental build — not security audited. Don’t use it for anything that must stay secret.")
-                }
-                .font(LFont.caption).foregroundStyle(LColor.inkSecondary)
-                .multilineTextAlignment(.center)
-                .padding(.top, Space.xs)
-
                 Spacer(minLength: Space.lg)
             }
             .padding(.horizontal, Space.lg)

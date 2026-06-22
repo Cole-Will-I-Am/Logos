@@ -241,10 +241,14 @@ final class Session: ObservableObject {
         }
     }
 
-    func startConversation(with peer: String) {
+    /// `addContact` controls whether `peer` is also filed into the local address book.
+    /// User-initiated chats (compose / QR / first send) add the contact; an inbound
+    /// message from an unknown sender opens a conversation but does NOT auto-add them —
+    /// delivery is open, so anyone can post, and a stranger shouldn't land in contacts.
+    func startConversation(with peer: String, addContact: Bool = true) {
         if !conversations.contains(peer) { conversations.append(peer) }
         if messages[peer] == nil { messages[peer] = [] }
-        if !contacts.contains(peer) { contacts.append(peer); contacts.sort() }
+        if addContact, !contacts.contains(peer) { contacts.append(peer); contacts.sort() }
         persist()
     }
 
@@ -522,7 +526,7 @@ final class Session: ObservableObject {
         let id: String; let name: String; let mime: String; let size: Int
         let isImage: Bool; let idx: Int; let total: Int
     }
-    private struct RxAtt { let header: AttHeader; var parts: [Int: Data]; let placeholderId: UUID; let peer: String }
+    private struct RxAtt { let header: AttHeader; var parts: [Int: Data]; let placeholderId: UUID; let peer: String; var lastActivity: Date }
     private var rxAssembly: [String: RxAtt] = [:]
 
     var attachmentsDir: URL { dir.appendingPathComponent("logos-attachments", isDirectory: true) }
@@ -619,13 +623,14 @@ final class Session: ObservableObject {
                 text: "", mine: false, status: .sending, at: Date(),
                 attachment: Attachment(id: header.id, name: header.name, mime: header.mime,
                                        size: header.size, isImage: header.isImage))
-            rx = RxAtt(header: header, parts: [:], placeholderId: placeholder.id, peer: peer)
+            rx = RxAtt(header: header, parts: [:], placeholderId: placeholder.id, peer: peer, lastActivity: Date())
             messages[peer, default: []].append(placeholder)
             appended = true
             // Bound memory if a sender wedges incomplete assemblies.
             if rxAssembly.count > 8, let stale = rxAssembly.keys.first { rxAssembly[stale] = nil }
         }
         rx.parts[header.idx] = data
+        rx.lastActivity = Date()
         rxAssembly[header.id] = rx
         attProgress[rx.placeholderId] = Double(rx.parts.count) / Double(header.total)
         if rx.parts.count >= header.total {
@@ -1001,7 +1006,7 @@ final class Session: ObservableObject {
                     if key != activePeer { unread[key, default: 0] += 1 }
                     continue
                 }
-                startConversation(with: m.from)
+                startConversation(with: m.from, addContact: false)
                 let appended: Bool
                 if let chunk = Self.decodeChunk(m.text) {
                     // Attachment chunk: placeholder on first, finalize in place on last.
@@ -1015,6 +1020,15 @@ final class Session: ObservableObject {
                     if m.from != activePeer { unread[m.from, default: 0] += 1 }
                     if security[m.from] == nil { security[m.from] = .encrypted }
                 }
+            }
+            // Time out attachment transfers that stalled mid-stream (sender backgrounded
+            // or dropped) so their bubble flips to failed instead of spinning forever.
+            let now = Date()
+            let stalled = rxAssembly.filter { now.timeIntervalSince($0.value.lastActivity) > 120 }
+            for (id, rx) in stalled {
+                rxAssembly[id] = nil
+                attProgress[rx.placeholderId] = nil
+                setStatus(rx.placeholderId, in: rx.peer, .failed("Attachment didn’t finish arriving."))
             }
             // recv() also processes group invites/membership updates (returned as no
             // message), so refresh the group list every poll (cheap; updates on change).

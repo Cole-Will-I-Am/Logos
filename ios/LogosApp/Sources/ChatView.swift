@@ -81,6 +81,7 @@ struct ChatView: View {
             Task {
                 let data = try? await item.loadTransferable(type: Data.self)
                 if let data { sendImage(data) }
+                else { session.lastError = "Couldn’t load that photo — it may still be downloading from iCloud. Try again in a moment." }
                 photoItem = nil
             }
         }
@@ -109,6 +110,15 @@ struct ChatView: View {
     @MainActor private func sendFile(_ url: URL) {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        // Reject oversized files BEFORE loading them into memory: picking a multi-GB file
+        // would otherwise read straight into RAM on the main thread and OOM-crash, since
+        // the cap in sendAttachment only checks after the whole file is already read.
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        guard size <= Session.attMaxBytes else {
+            Haptic.warn()
+            session.lastError = "That file is too large to send (max \(Session.attMaxBytes / (1024 * 1024)) MB)."
+            return
+        }
         guard let data = try? Data(contentsOf: url) else { session.lastError = "Couldn’t read that file."; return }
         let type = UTType(filenameExtension: url.pathExtension)
         let isImage = type?.conforms(to: .image) ?? false
@@ -213,6 +223,7 @@ struct ChatView: View {
 
     private var composer: some View {
         VStack(spacing: 0) {
+            generalErrorBanner
             aiErrorBanner
             mentionSuggestion
             Divider().background(LColor.hairline)
@@ -288,6 +299,18 @@ struct ChatView: View {
         guard provider != .none, let frag = mentionFragment else { return false }
         if Session.mentionsAI(draft, name: aiName) { return false }
         return aiName.lowercased().hasPrefix(frag.lowercased())
+    }
+
+    /// Surfaces a general failure (attachment too large, couldn’t read a file/photo, a
+    /// failed send) that otherwise only set session.lastError with no visible feedback.
+    @ViewBuilder private var generalErrorBanner: some View {
+        if let e = session.lastError {
+            LBanner(tone: .danger, icon: "exclamationmark.triangle.fill",
+                    title: "Couldn’t do that", message: e,
+                    actionTitle: "Dismiss", action: { session.clearError() })
+                .padding(.horizontal, Space.md).padding(.vertical, Space.xs)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
     }
 
     /// Surfaces an in-chat @mention failure (cloud/network/etc.) instead of swallowing it.
@@ -607,7 +630,11 @@ struct ComposeSheet: View {
     }
 
     private func handleScan(_ code: String) {
-        guard let (host, q) = LogosQR.parse(code), host == "add", let u = q["u"] else { return }
+        guard let (host, q) = LogosQR.parse(code), host == "add", let raw = q["u"] else { return }
+        // Usernames are lowercase-only in the core; normalize so a mixed-case QR doesn't
+        // create a thread whose every send fails with a cryptic validation error.
+        let u = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !u.isEmpty else { return }
         if let r = q["r"], r != session.relayURL { wrongRelay = true; return }
         Haptic.tap()
         session.startConversation(with: u)
@@ -615,9 +642,10 @@ struct ComposeSheet: View {
     }
 
     private func start() {
-        guard !trimmed.isEmpty else { return }
+        let name = trimmed.lowercased()
+        guard !name.isEmpty else { return }
         Haptic.tap()
-        session.startConversation(with: trimmed)
+        session.startConversation(with: name)
         dismiss()
     }
 }

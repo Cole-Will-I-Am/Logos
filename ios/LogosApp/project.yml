@@ -21,7 +21,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.colecantcode.logos
         PRODUCT_NAME: Logos
-        MARKETING_VERSION: "0.1.27"
+        MARKETING_VERSION: "0.1.28"
         CURRENT_PROJECT_VERSION: 1
         # Signing: cloud-managed automatic signing via the App Store Connect API
         # key in CI (no Mac, nothing to export). The workflow passes/overrides
@@ -31,11 +31,12 @@ targets:
         CODE_SIGN_IDENTITY: "Apple Development"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: true
-        # Export compliance: this beta declares no non-exempt encryption so the
-        # TestFlight upload isn't gated on the compliance questionnaire. NOTE:
-        # Logos does use custom E2EE — revisit with a proper self-classification
-        # before any public App Store release (see docs/CI_TESTFLIGHT_SETUP.md).
-        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: false
+        # Export compliance: Logos uses custom E2EE — NOT exempt. Declared as using
+        # encryption; it qualifies for the mass-market exemption (ECCN 5D992.c). This
+        # REQUIRES a one-time + annual BIS/NSA self-classification report on file before
+        # App Store release (crypt@bis.doc.gov + enc@nsa.gov). Also answer the App Store
+        # Connect export questionnaire to match. See docs/CI_TESTFLIGHT_SETUP.md.
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: true
         INFOPLIST_KEY_NSCameraUsageDescription: "Logos uses the camera only to scan a contact’s QR code — to add them or verify their safety number. Nothing is recorded."
         INFOPLIST_KEY_CFBundleDisplayName: Logos
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: true
