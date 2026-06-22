@@ -92,6 +92,7 @@ struct ConversationsView: View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 if showExperimental && query.isEmpty { experimentalBanner }
+                if !session.conversations.isEmpty && query.isEmpty { looseEndsEntry }
                 if matchesAIRow { aiRow }
                 ForEach(visibleGroups, id: \.id) { groupRow($0) }
                 ForEach(visible, id: \.self) { row($0) }
@@ -135,6 +136,12 @@ struct ConversationsView: View {
     }
     @ViewBuilder private func groupRow(_ g: GroupInfo) -> some View {
         NavigationLink { GroupChatView(groupId: g.id) } label: { GroupRow(group: g) }
+            .buttonStyle(.plain)
+        Divider().background(LColor.hairline).padding(.leading, 78)
+    }
+
+    @ViewBuilder private var looseEndsEntry: some View {
+        NavigationLink { LooseEndsView() } label: { LooseEndsInboxRow() }
             .buttonStyle(.plain)
         Divider().background(LColor.hairline).padding(.leading, 78)
     }
