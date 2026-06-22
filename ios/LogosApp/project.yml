@@ -31,12 +31,17 @@ targets:
         CODE_SIGN_IDENTITY: "Apple Development"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: true
-        # Export compliance: Logos uses custom E2EE — NOT exempt. Declared as using
-        # encryption; it qualifies for the mass-market exemption (ECCN 5D992.c). This
-        # REQUIRES a one-time + annual BIS/NSA self-classification report on file before
-        # App Store release (crypt@bis.doc.gov + enc@nsa.gov). Also answer the App Store
-        # Connect export questionnaire to match. See docs/CI_TESTFLIGHT_SETUP.md.
-        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: true
+        # Export compliance: Logos uses custom E2EE (NOT exempt). We self-declare `false`
+        # here so altool can upload to TestFlight — setting `true` requires a matching
+        # ITSEncryptionExportComplianceCode that App Store Connect only issues AFTER you
+        # complete the export-compliance questionnaire, so `true` with no code is rejected
+        # at upload (Validation 409, Invalid Export Compliance Code).
+        # BEFORE ACTUAL APP STORE SUBMISSION: (1) file the one-time + annual BIS/NSA self-
+        # classification (crypt@bis.doc.gov + enc@nsa.gov) declaring mass-market 5D992.c;
+        # (2) complete the ASC export questionnaire to get the compliance code; then
+        # (3) set this to `true` AND add INFOPLIST_KEY_ITSEncryptionExportComplianceCode:
+        # <code>. See docs/CI_TESTFLIGHT_SETUP.md.
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: false
         INFOPLIST_KEY_NSCameraUsageDescription: "Logos uses the camera only to scan a contact’s QR code — to add them or verify their safety number. Nothing is recorded."
         INFOPLIST_KEY_CFBundleDisplayName: Logos
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: true
