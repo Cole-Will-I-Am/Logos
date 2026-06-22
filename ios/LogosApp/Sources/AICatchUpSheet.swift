@@ -60,7 +60,7 @@ struct AICatchUpSheet: View {
                 LBanner(tone: .danger, icon: "exclamationmark.triangle.fill",
                         title: "Couldn't summarize", message: e)
             } else {
-                Text(summary).font(LFont.body).foregroundStyle(LColor.ink)
+                Text(Markdown.render(summary)).font(LFont.body).foregroundStyle(LColor.ink)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 Text("AI summaries can be wrong — check the chat for anything important.")
                     .font(LFont.caption).foregroundStyle(LColor.inkTertiary)

@@ -140,7 +140,7 @@ struct ChatView: View {
                     firstSessionChip
                     if security == .identityChanged { identityChangedInterstitial }
                     ForEach(msgs) { msg in
-                        MessageBubble(message: msg) { session.retry(msg.id, in: peer) }
+                        MessageBubble(message: msg, markdown: msg.aiAuthor != nil) { session.retry(msg.id, in: peer) }
                             .id(msg.id)
                     }
                     if session.aiMentionPending.contains(peer) { TypingBubble().id("ai-typing") }
@@ -373,6 +373,8 @@ struct MessageBubble: View {
     /// The 1:1 thread shows a delivery/encryption status under each outbound bubble.
     /// The local AI thread has no relay delivery, so it opts out (`showStatus: false`).
     var showStatus = true
+    /// Render the body as markdown — AI replies only; user/peer text stays literal.
+    var markdown = false
     let onRetry: () -> Void
 
     private var isAI: Bool { message.aiAuthor != nil }
@@ -388,9 +390,9 @@ struct MessageBubble: View {
                         .padding(.horizontal, 4)
                 }
                 if let att = message.attachment {
-                    AttachmentBubble(attachment: att, mine: message.mine)
+                    AttachmentBubble(attachment: att, mine: message.mine, messageId: message.id)
                 } else {
-                    Text(message.text)
+                    (markdown ? Text(Markdown.render(message.text)) : Text(message.text))
                         .font(LFont.body)
                         .foregroundStyle(isAI ? LColor.ink : (message.mine ? LColor.bubbleMineText : LColor.ink))
                         .padding(.horizontal, 13).padding(.vertical, 9)
@@ -451,12 +453,27 @@ private struct AttachmentBubble: View {
     @EnvironmentObject var session: Session
     let attachment: Attachment
     let mine: Bool
+    let messageId: UUID
     @State private var showImage = false
 
     private var url: URL { session.attachmentURL(attachment.id) }
     private var exists: Bool { FileManager.default.fileExists(atPath: url.path) }
 
     var body: some View {
+        content.overlay {
+            if let p = session.attProgress[messageId] {
+                ZStack {
+                    RoundedRectangle(cornerRadius: Radius.bubble, style: .continuous).fill(.black.opacity(0.3))
+                    Text("\(Int(p * 100))%")
+                        .font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(.black.opacity(0.45), in: Capsule())
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var content: some View {
         if attachment.isImage, exists, let ui = UIImage(contentsOfFile: url.path) {
             Image(uiImage: ui)
                 .resizable().scaledToFill()

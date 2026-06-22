@@ -87,7 +87,7 @@ struct AIChatView: View {
                 LazyVStack(spacing: Space.xs) {
                     intro
                     ForEach(msgs) { msg in
-                        MessageBubble(message: msg, showStatus: false) {}
+                        MessageBubble(message: msg, showStatus: false, markdown: !msg.mine) {}
                             .id(msg.id)
                     }
                     if session.aiPending { TypingBubble().id("typing") }

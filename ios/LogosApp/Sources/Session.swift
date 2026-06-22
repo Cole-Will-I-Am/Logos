@@ -285,6 +285,10 @@ final class Session: ObservableObject {
     /// Delete a conversation and its local history on THIS device only — the relay
     /// and the other person are unaffected.
     func deleteConversation(_ peer: String) {
+        // Remove on-disk attachment files for this chat (no orphans left behind).
+        for m in messages[peer] ?? [] {
+            if let att = m.attachment { try? FileManager.default.removeItem(at: attachmentURL(att.id)) }
+        }
         conversations.removeAll { $0 == peer }
         messages[peer] = nil
         security[peer] = nil
@@ -399,6 +403,8 @@ final class Session: ObservableObject {
     @Published var aiMentionPending: Set<String> = []
     /// Last in-chat @mention failure, surfaced as a banner in the thread (not swallowed).
     @Published var aiMentionError: String?
+    /// In-flight attachment transfer progress (0...1), keyed by message id (send + receive).
+    @Published var attProgress: [UUID: Double] = [:]
 
     var aiMessages: [ChatMessage] { messages[Self.aiPeer] ?? [] }
 
@@ -497,7 +503,7 @@ final class Session: ObservableObject {
         let id: String; let name: String; let mime: String; let size: Int
         let isImage: Bool; let idx: Int; let total: Int
     }
-    private struct RxAtt { let header: AttHeader; var parts: [Int: Data] }
+    private struct RxAtt { let header: AttHeader; var parts: [Int: Data]; let placeholderId: UUID; let peer: String }
     private var rxAssembly: [String: RxAtt] = [:]
 
     var attachmentsDir: URL { dir.appendingPathComponent("logos-attachments", isDirectory: true) }
@@ -538,6 +544,7 @@ final class Session: ObservableObject {
             data.subdata(in: off ..< min(off + Self.attChunkRaw, data.count))
         }
         let total = max(chunks.count, 1)
+        attProgress[msgId] = 0
         Task {
             do {
                 for (idx, chunk) in chunks.enumerated() {
@@ -546,10 +553,13 @@ final class Session: ObservableObject {
                     let headerB64 = try JSONEncoder().encode(header).base64EncodedString()
                     let wire = Self.attMarker + headerB64 + "\u{01}" + chunk.base64EncodedString()
                     try await runBlocking { try client.send(to: peer, message: wire) }
+                    attProgress[msgId] = Double(idx + 1) / Double(total)
                 }
+                attProgress[msgId] = nil
                 setStatus(msgId, in: peer, .sent)
                 if security[peer] == nil { security[peer] = .encrypted }
             } catch {
+                attProgress[msgId] = nil
                 switch classify(error) {
                 case .identityChanged:
                     setStatus(msgId, in: peer, .blocked(
@@ -576,28 +586,44 @@ final class Session: ObservableObject {
         return (header, data)
     }
 
-    /// Buffer an inbound chunk; return a finished message once all chunks have arrived.
-    private func ingestChunk(_ header: AttHeader, _ data: Data) -> ChatMessage? {
-        guard header.total > 0, header.size <= Self.attMaxBytes else { return nil }
-        var rx = rxAssembly[header.id] ?? RxAtt(header: header, parts: [:])
+    /// Buffer an inbound chunk. On the FIRST chunk it appends a "receiving…" placeholder
+    /// bubble (with live progress); on the last it writes the file and finalizes that
+    /// bubble in place. Returns true iff a new bubble was appended (for unread counting).
+    private func receiveChunk(from peer: String, _ header: AttHeader, _ data: Data) -> Bool {
+        guard header.total > 0, header.size <= Self.attMaxBytes else { return false }
+        var appended = false
+        var rx: RxAtt
+        if let existing = rxAssembly[header.id] {
+            rx = existing
+        } else {
+            let placeholder = ChatMessage(
+                text: "", mine: false, status: .sending, at: Date(),
+                attachment: Attachment(id: header.id, name: header.name, mime: header.mime,
+                                       size: header.size, isImage: header.isImage))
+            rx = RxAtt(header: header, parts: [:], placeholderId: placeholder.id, peer: peer)
+            messages[peer, default: []].append(placeholder)
+            appended = true
+            // Bound memory if a sender wedges incomplete assemblies.
+            if rxAssembly.count > 8, let stale = rxAssembly.keys.first { rxAssembly[stale] = nil }
+        }
         rx.parts[header.idx] = data
         rxAssembly[header.id] = rx
-        // Bound memory if a sender wedges incomplete assemblies.
-        if rxAssembly.count > 8, let stale = rxAssembly.keys.first(where: { $0 != header.id }) {
-            rxAssembly[stale] = nil
+        attProgress[rx.placeholderId] = Double(rx.parts.count) / Double(header.total)
+        if rx.parts.count >= header.total {
+            rxAssembly[header.id] = nil
+            attProgress[rx.placeholderId] = nil
+            var full = Data(); var ok = true
+            for i in 0 ..< header.total {
+                if let part = rx.parts[i] { full.append(part) } else { ok = false; break }
+            }
+            if ok, full.count <= Self.attMaxBytes {
+                writeAttachment(id: header.id, data: full)
+                setStatus(rx.placeholderId, in: peer, .sent)   // flips bubble → image/file renders
+            } else {
+                setStatus(rx.placeholderId, in: peer, .failed("Attachment didn’t fully arrive."))
+            }
         }
-        guard rx.parts.count >= header.total else { return nil }
-        var full = Data()
-        for i in 0 ..< header.total {
-            guard let p = rx.parts[i] else { return nil }   // gap — wait for it
-            full.append(p)
-        }
-        rxAssembly[header.id] = nil
-        guard full.count <= Self.attMaxBytes else { return nil }
-        writeAttachment(id: header.id, data: full)
-        let att = Attachment(id: header.id, name: header.name, mime: header.mime,
-                             size: full.count, isImage: header.isImage)
-        return ChatMessage(text: "", mine: false, status: .sent, at: Date(), attachment: att)
+        return appended
     }
 
     // MARK: - Contact verification
@@ -698,7 +724,13 @@ final class Session: ObservableObject {
         // A message still `.sending` at last save never confirmed delivery — surface
         // it as failed-but-retryable rather than a spinner that never resolves.
         messages = snap.messages.mapValues { arr in
-            arr.map { m in
+            arr.compactMap { m -> ChatMessage? in
+                // Drop an inbound attachment whose file never finished arriving (was a
+                // mid-transfer placeholder when the app was killed).
+                if let att = m.attachment, !m.mine,
+                   !FileManager.default.fileExists(atPath: attachmentURL(att.id).path) {
+                    return nil
+                }
                 guard case .sending = m.status else { return m }
                 var fixed = m; fixed.status = .failed("Interrupted — tap to retry"); return fixed
             }
@@ -806,12 +838,8 @@ final class Session: ObservableObject {
                 startConversation(with: m.from)
                 let appended: Bool
                 if let chunk = Self.decodeChunk(m.text) {
-                    // Attachment chunk: buffer it; only surface a bubble once it's whole.
-                    if let done = ingestChunk(chunk.header, chunk.data) {
-                        messages[m.from, default: []].append(done); appended = true
-                    } else {
-                        appended = false
-                    }
+                    // Attachment chunk: placeholder on first, finalize in place on last.
+                    appended = receiveChunk(from: m.from, chunk.header, chunk.data)
                 } else {
                     messages[m.from, default: []].append(
                         ChatMessage(text: m.text, mine: false, status: .sent, at: Date()))
