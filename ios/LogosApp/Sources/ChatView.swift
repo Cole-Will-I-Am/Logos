@@ -15,6 +15,8 @@ struct ChatView: View {
     @State private var showPhotoPicker = false
     @State private var photoItem: PhotosPickerItem?
     @State private var showFileImporter = false
+    @State private var aiSetupPrompt = false
+    @State private var showAISettings = false
     @FocusState private var composerFocused: Bool
 
     private var msgs: [ChatMessage] { session.messages[peer] ?? [] }
@@ -38,7 +40,7 @@ struct ChatView: View {
         .animation(Motion.standard, value: session.online)
         .navigationTitle(session.displayName(for: peer))
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { session.setActive(peer) }
+        .onAppear { session.setActive(peer); session.aiMentionError = nil }
         .onDisappear { session.setActive(nil) }
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -85,6 +87,13 @@ struct ChatView: View {
         .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
             if case .success(let urls) = result, let url = urls.first { sendFile(url) }
         }
+        .alert("Set up \(aiName)?", isPresented: $aiSetupPrompt) {
+            Button("Set up AI") { showAISettings = true }
+            Button("Not now", role: .cancel) {}
+        } message: {
+            Text("To ask your AI right in a chat with @\(aiName), add a provider — free on-device, or your own key — in Settings → AI.")
+        }
+        .sheet(isPresented: $showAISettings) { AISettingsView() }
     }
 
     // MARK: - Attachments
@@ -204,6 +213,7 @@ struct ChatView: View {
 
     private var composer: some View {
         VStack(spacing: 0) {
+            aiErrorBanner
             mentionSuggestion
             Divider().background(LColor.hairline)
             HStack(alignment: .bottom, spacing: Space.xs) {
@@ -280,6 +290,17 @@ struct ChatView: View {
         return aiName.lowercased().hasPrefix(frag.lowercased())
     }
 
+    /// Surfaces an in-chat @mention failure (cloud/network/etc.) instead of swallowing it.
+    @ViewBuilder private var aiErrorBanner: some View {
+        if let e = session.aiMentionError {
+            LBanner(tone: .danger, icon: "exclamationmark.triangle.fill",
+                    title: "\(aiName) couldn’t answer", message: e,
+                    actionTitle: "Dismiss", action: { session.aiMentionError = nil })
+                .padding(.horizontal, Space.md).padding(.vertical, Space.xs)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
     @ViewBuilder private var mentionSuggestion: some View {
         if showMentionSuggestion {
             Button(action: insertMention) {
@@ -326,7 +347,8 @@ struct ChatView: View {
     /// If the just-sent message tags the assistant, generate an answer for the thread
     /// (gated by cloud consent). On-device answers immediately; cloud asks once.
     private func maybeAskAI(_ text: String) {
-        guard provider != .none, Session.mentionsAI(text, name: aiName) else { return }
+        guard Session.mentionsAI(text, name: aiName) else { return }
+        guard provider != .none else { aiSetupPrompt = true; return }   // feedback, not silence
         let question = strippedQuestion(text)
         if provider.isCloud && !AIConfig.inChatCloudConsented {
             pendingQuestion = question

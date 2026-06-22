@@ -397,6 +397,8 @@ final class Session: ObservableObject {
     @Published var aiError: String?
     /// Peers with an in-chat @mention answer currently being generated (typing dots).
     @Published var aiMentionPending: Set<String> = []
+    /// Last in-chat @mention failure, surfaced as a banner in the thread (not swallowed).
+    @Published var aiMentionError: String?
 
     var aiMessages: [ChatMessage] { messages[Self.aiPeer] ?? [] }
 
@@ -451,6 +453,7 @@ final class Session: ObservableObject {
     func mentionAI(in peer: String, question: String) {
         let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard client != nil, !q.isEmpty, !aiMentionPending.contains(peer) else { return }
+        aiMentionError = nil
         aiMentionPending.insert(peer)
         let name = AIConfig.assistantName
         let me = username ?? "Me"
@@ -464,7 +467,7 @@ final class Session: ObservableObject {
                 sendAIAnswer(to: peer, name: name, answer: answer)
             } catch {
                 aiMentionPending.remove(peer)
-                lastError = (error as? AIError)?.errorDescription ?? error.localizedDescription
+                aiMentionError = (error as? AIError)?.errorDescription ?? error.localizedDescription
                 Haptic.warn()
             }
         }
