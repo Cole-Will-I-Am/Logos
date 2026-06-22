@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject var session: Session
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     @State private var copied = false
     @State private var relayMode = 0       // 0 = public, 1 = private relay
     @State private var privateURL = ""
@@ -19,6 +20,7 @@ struct SettingsView: View {
                 networkSection
                 aiSection
                 privacySection
+                safetySection
                 relayVisibilityLink
                 aboutSection
             }
@@ -252,6 +254,24 @@ struct SettingsView: View {
         }
     }
 
+    private var safetySection: some View {
+        SettingsGroup(title: "Safety") {
+            NavigationLink { BlockedUsersView().environmentObject(session) } label: {
+                SettingsRow(icon: "hand.raised.fill", title: "Blocked",
+                            detail: session.blocked.isEmpty ? "No one blocked" : "\(session.blocked.count) blocked")
+            }
+            .buttonStyle(.plain)
+            Button {
+                Haptic.tap()
+                let enc: (String) -> String = { $0.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "" }
+                if let url = URL(string: "mailto:\(Support.reportEmail)?subject=\(enc("Logos support"))") { openURL(url) }
+            } label: {
+                SettingsRow(icon: "envelope.fill", title: "Report a problem", detail: Support.reportEmail)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
     private var aboutSection: some View {
         VStack(spacing: Space.md) {
             Text("Logos · v\(appVersion)")
@@ -261,6 +281,41 @@ struct SettingsView: View {
 
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
+    }
+}
+
+// MARK: - Blocked users
+
+private struct BlockedUsersView: View {
+    @EnvironmentObject var session: Session
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Space.md) {
+                if session.blocked.isEmpty {
+                    Text("No one is blocked.")
+                        .font(LFont.footnote).foregroundStyle(LColor.inkSecondary)
+                        .frame(maxWidth: .infinity).padding(.top, Space.xl)
+                } else {
+                    SettingsGroup(title: "Blocked") {
+                        ForEach(session.blocked.sorted(), id: \.self) { name in
+                            HStack(spacing: Space.sm) {
+                                Image(systemName: "hand.raised.fill").font(.system(size: 15, weight: .medium))
+                                    .foregroundStyle(LColor.goldText).frame(width: 26)
+                                Text(name).font(LFont.body).foregroundStyle(LColor.ink)
+                                Spacer(minLength: 0)
+                                Button("Unblock") { Haptic.tap(); session.unblock(name) }
+                                    .font(LFont.footnote).foregroundStyle(LColor.goldText)
+                            }
+                            .padding(Space.md)
+                        }
+                    }
+                }
+            }
+            .padding(Space.lg).frame(maxWidth: 560).frame(maxWidth: .infinity)
+        }
+        .logosBackground(watermark: true)
+        .navigationTitle("Blocked")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

@@ -17,6 +17,10 @@ struct ChatView: View {
     @State private var showFileImporter = false
     @State private var aiSetupPrompt = false
     @State private var showAISettings = false
+    @State private var showBlockConfirm = false
+    @State private var showReportConfirm = false
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     @FocusState private var composerFocused: Bool
 
     private var msgs: [ChatMessage] { session.messages[peer] ?? [] }
@@ -63,6 +67,33 @@ struct ChatView: View {
                 }
                 .accessibilityLabel("Conversation details")
             }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button(role: .destructive) { showBlockConfirm = true } label: {
+                        Label("Block \(session.displayName(for: peer))", systemImage: "hand.raised")
+                    }
+                    Button(role: .destructive) { showReportConfirm = true } label: {
+                        Label("Report \(session.displayName(for: peer))", systemImage: "exclamationmark.bubble")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle").foregroundStyle(LColor.goldText)
+                }
+                .accessibilityLabel("More options")
+            }
+        }
+        .confirmationDialog("Block \(session.displayName(for: peer))?",
+                            isPresented: $showBlockConfirm, titleVisibility: .visible) {
+            Button("Block", role: .destructive) { session.block(peer); dismiss() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You won't receive messages from this person, and this chat will be removed from this device. You can unblock them later in Settings → Blocked.")
+        }
+        .confirmationDialog("Report \(session.displayName(for: peer))?",
+                            isPresented: $showReportConfirm, titleVisibility: .visible) {
+            Button("Report & Block", role: .destructive) { reportAndBlock() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Sends a report to the Logos team and blocks this person. Because chats are end-to-end encrypted, only what you choose to write in the report is shared.")
         }
         .sheet(isPresented: $showCatchup) { AICatchUpSheet(peer: peer).environmentObject(session) }
         .alert("Use \(aiName) in this chat?", isPresented: $showCloudConsent) {
@@ -95,6 +126,25 @@ struct ChatView: View {
             Text("To ask your AI right in a chat with @\(aiName), add a provider — free on-device, or your own key — in Settings → AI.")
         }
         .sheet(isPresented: $showAISettings) { AISettingsView() }
+    }
+
+    // MARK: - Report
+
+    private func reportAndBlock() {
+        let subject = "Logos report: \(peer)"
+        let body = """
+        Reporting user: \(peer)
+        Reported by: \(session.username ?? "unknown")
+
+        Reason (please describe):
+
+        """
+        let enc: (String) -> String = { $0.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "" }
+        if let url = URL(string: "mailto:\(Support.reportEmail)?subject=\(enc(subject))&body=\(enc(body))") {
+            openURL(url)
+        }
+        session.block(peer)
+        dismiss()
     }
 
     // MARK: - Attachments

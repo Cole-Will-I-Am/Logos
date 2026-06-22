@@ -17,6 +17,12 @@ enum MessageStatus: Equatable, Codable {
 /// Per-conversation security posture surfaced to the UI.
 enum SessionSecurity: String, Codable { case encrypted, verified, identityChanged }
 
+/// Public contact for abuse reports / support (Guideline 1.2 — user-generated
+/// content). Change to a dedicated address if you'd rather not expose this one.
+enum Support {
+    static let reportEmail = "coltonlwilliams95@gmail.com"
+}
+
 /// One displayed chat message (UI-side; the cryptographic session state lives in
 /// the Rust store). Persisted to disk via `HistorySnapshot` so history survives
 /// app suspension/relaunch.
@@ -68,6 +74,9 @@ final class Session: ObservableObject {
     // Inbox state (persisted with history).
     @Published var pinned: Set<String> = []
     @Published var archived: Set<String> = []
+    /// Blocked usernames: their incoming messages are dropped and they can't be
+    /// messaged. Manageable from Settings → Blocked. Local, device-only.
+    @Published var blocked: Set<String> = []
     @Published var unread: [String: Int] = [:]
     // Local, device-only contact customization (never shared / never leaves the device).
     @Published var nicknames: [String: String] = [:]
@@ -139,7 +148,7 @@ final class Session: ObservableObject {
         username = nil; mailboxId = ""
         conversations = []; contacts = []; messages = [:]; security = [:]; lastError = nil
         online = true; lastSynced = nil; syncing = false
-        pinned = []; archived = []; unread = [:]; nicknames = [:]; avatars = [:]
+        pinned = []; archived = []; blocked = []; unread = [:]; nicknames = [:]; avatars = [:]
         looseEnds = []; looseEndsResolved = []; looseEndsScannedAt = nil
         relayURL = trimmed
         UserDefaults.standard.set(trimmed, forKey: "relayURL")
@@ -166,7 +175,7 @@ final class Session: ObservableObject {
         username = nil; mailboxId = ""
         conversations = []; contacts = []; messages = [:]; security = [:]; lastError = nil
         online = true; lastSynced = nil; syncing = false
-        pinned = []; archived = []; unread = [:]; nicknames = [:]; avatars = [:]
+        pinned = []; archived = []; blocked = []; unread = [:]; nicknames = [:]; avatars = [:]
         looseEnds = []; looseEndsResolved = []; looseEndsScannedAt = nil
         activePeer = nil
     }
@@ -296,6 +305,22 @@ final class Session: ObservableObject {
         if archived.contains(peer) { archived.remove(peer) } else { archived.insert(peer) }
         persist()
     }
+
+    // MARK: - Block / report
+    func isBlocked(_ peer: String) -> Bool { blocked.contains(peer) }
+    /// Block a user: their future messages are dropped on arrival, and their chat,
+    /// history, and contact entry are removed from this device. Reversible from
+    /// Settings → Blocked.
+    func block(_ peer: String) {
+        blocked.insert(peer)
+        removeContact(peer)   // deletes chat/history/contact + persists
+        persist()
+    }
+    func unblock(_ peer: String) {
+        guard blocked.contains(peer) else { return }
+        blocked.remove(peer)
+        persist()
+    }
     /// Delete a conversation and its local history on THIS device only — the relay
     /// and the other person are unaffected.
     func deleteConversation(_ peer: String) {
@@ -348,6 +373,7 @@ final class Session: ObservableObject {
 
     func send(to peer: String, text: String) {
         guard client != nil else { lastError = "No identity loaded."; return }
+        guard !blocked.contains(peer) else { return }
         startConversation(with: peer)
         let msg = ChatMessage(text: text, mine: true, status: .sending, at: Date())
         messages[peer, default: []].append(msg)
@@ -545,6 +571,7 @@ final class Session: ObservableObject {
     /// ciphertext). The bubble flips to `.sent` once every chunk is delivered.
     func sendAttachment(to peer: String, data: Data, name: String, mime: String, isImage: Bool) {
         guard client != nil else { lastError = "No identity loaded."; return }
+        guard !blocked.contains(peer) else { return }
         guard data.count <= Self.attMaxBytes else {
             lastError = "That file is too large to send (max \(Self.attMaxBytes / (1024 * 1024)) MB)."
             Haptic.warn(); return
@@ -801,6 +828,7 @@ final class Session: ObservableObject {
         var security: [String: SessionSecurity]
         var pinned: [String]?
         var archived: [String]?
+        var blocked: [String]?
         var unread: [String: Int]?
         var nicknames: [String: String]?
         var contacts: [String]?
@@ -828,6 +856,7 @@ final class Session: ObservableObject {
         security = snap.security
         pinned = Set(snap.pinned ?? [])
         archived = Set(snap.archived ?? [])
+        blocked = Set(snap.blocked ?? [])
         unread = snap.unread ?? [:]
         nicknames = snap.nicknames ?? [:]
         for peer in conversations {
@@ -855,8 +884,8 @@ final class Session: ObservableObject {
 
     private func persist() {
         let snap = HistorySnapshot(conversations: conversations, messages: messages, security: security,
-                                   pinned: Array(pinned), archived: Array(archived), unread: unread,
-                                   nicknames: nicknames, contacts: contacts)
+                                   pinned: Array(pinned), archived: Array(archived), blocked: Array(blocked),
+                                   unread: unread, nicknames: nicknames, contacts: contacts)
         do {
             let data = try JSONEncoder().encode(snap)
             // Seal at rest with the device Keychain key (defence in depth alongside
@@ -997,6 +1026,8 @@ final class Session: ObservableObject {
             // its results so we don't resurrect a deleted identity's history (M2).
             guard gen == identityGeneration, self.client != nil else { return }
             for m in incoming {
+                // Blocked sender → silently drop (no store, no notify, no conversation).
+                if blocked.contains(m.from) { continue }
                 if let gid = m.group {
                     // Group message → the group thread, attributed to the sender (not a
                     // 1:1 with them; don't add them to contacts/conversations).
