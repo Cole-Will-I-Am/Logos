@@ -389,6 +389,12 @@ struct MessageBubble: View {
                         .foregroundStyle(LColor.goldText)
                         .padding(.horizontal, 4)
                 }
+                if let s = message.sender, !message.mine {
+                    Text(s)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(LColor.goldText)
+                        .padding(.horizontal, 4)
+                }
                 if let att = message.attachment {
                     AttachmentBubble(attachment: att, mine: message.mine, messageId: message.id)
                 } else {

@@ -35,6 +35,9 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     /// `logos-attachments/<id>`; only this small descriptor is persisted. Optional so
     /// existing persisted history decodes with `nil`.
     var attachment: Attachment? = nil
+    /// For an incoming GROUP message, the sender's username (so the bubble can label
+    /// who spoke). nil for 1:1 and for your own messages. Optional → back-compat.
+    var sender: String? = nil
 }
 
 /// A photo or file attached to a message. Bytes are stored on disk (keyed by `id`),
@@ -175,6 +178,7 @@ final class Session: ObservableObject {
             username = c.username()
             mailboxId = c.mailbox()
             hardenStore()
+            refreshGroups()
             startPolling()
         } catch {
             lastError = friendly(error)
@@ -405,6 +409,9 @@ final class Session: ObservableObject {
     @Published var aiMentionError: String?
     /// In-flight attachment transfer progress (0...1), keyed by message id (send + receive).
     @Published var attProgress: [UUID: Double] = [:]
+    /// Groups this identity belongs to (mirrors the Rust store; refreshed each poll).
+    @Published var groups: [GroupInfo] = []
+    private var groupsSig = ""
 
     var aiMessages: [ChatMessage] { messages[Self.aiPeer] ?? [] }
 
@@ -626,6 +633,96 @@ final class Session: ObservableObject {
         return appended
     }
 
+    // MARK: - Group chats (E2EE sender-key; via the FFI)
+
+    /// Local thread key for a group. Group ids are hex; the "group:" prefix keeps them
+    /// from ever colliding with a 1:1 username key in `messages`.
+    static func groupKey(_ groupId: String) -> String { "group:" + groupId }
+    static func groupId(fromKey key: String) -> String { String(key.dropFirst("group:".count)) }
+
+    func groupMessages(_ groupId: String) -> [ChatMessage] { messages[Self.groupKey(groupId)] ?? [] }
+    func group(_ groupId: String) -> GroupInfo? { groups.first { $0.id == groupId } }
+    func isGroupAdmin(_ groupId: String) -> Bool {
+        guard let me = username, let g = group(groupId) else { return false }
+        return g.admins.contains(me)
+    }
+
+    /// Refresh the group list from the Rust store (cheap; only publishes on a change).
+    func refreshGroups() {
+        guard let client else { return }
+        let g = client.groups()
+        let sig = g.map { "\($0.id)|\($0.name)|\($0.members.count)|\($0.admins.count)" }.joined(separator: ";")
+        if sig != groupsSig { groupsSig = sig; groups = g }
+    }
+
+    /// Create a group and (best-effort) invite `members`; `onCreated` gets the new id.
+    func createGroup(name: String, members: [String], onCreated: ((String) -> Void)? = nil) {
+        guard let client else { lastError = "No identity loaded."; return }
+        Task {
+            do {
+                let gid = try await runBlocking { try client.createGroup(name: name, members: members) }
+                if messages[Self.groupKey(gid)] == nil { messages[Self.groupKey(gid)] = [] }
+                refreshGroups(); persist()
+                onCreated?(gid)
+            } catch { lastError = friendly(error); Haptic.warn() }
+        }
+    }
+
+    func sendToGroup(_ groupId: String, text: String) {
+        guard let client else { lastError = "No identity loaded."; return }
+        let key = Self.groupKey(groupId)
+        let msg = ChatMessage(text: text, mine: true, status: .sending, at: Date())
+        messages[key, default: []].append(msg)
+        let id = msg.id
+        Task {
+            do {
+                try await runBlocking { try client.sendGroup(groupId: groupId, message: text) }
+                setStatus(id, in: key, .sent)
+            } catch {
+                setStatus(id, in: key, .failed("Couldn’t send to the group. Tap to retry."))
+                lastError = friendly(error)
+            }
+        }
+    }
+
+    func retryGroup(_ id: UUID, in groupId: String) {
+        guard let client else { return }
+        let key = Self.groupKey(groupId)
+        guard let text = messages[key]?.first(where: { $0.id == id })?.text else { return }
+        setStatus(id, in: key, .sending)
+        Task {
+            do {
+                try await runBlocking { try client.sendGroup(groupId: groupId, message: text) }
+                setStatus(id, in: key, .sent)
+            } catch {
+                setStatus(id, in: key, .failed("Couldn’t send to the group. Tap to retry."))
+                lastError = friendly(error)
+            }
+        }
+    }
+
+    func addToGroup(_ groupId: String, _ username: String) {
+        guard let client else { return }
+        Task {
+            do { try await runBlocking { try client.addMember(groupId: groupId, username: username) }; refreshGroups(); persist() }
+            catch { lastError = friendly(error); Haptic.warn() }
+        }
+    }
+    func removeFromGroup(_ groupId: String, _ username: String) {
+        guard let client else { return }
+        Task {
+            do { try await runBlocking { try client.removeMember(groupId: groupId, username: username) }; refreshGroups(); persist() }
+            catch { lastError = friendly(error); Haptic.warn() }
+        }
+    }
+    func renameGroupChat(_ groupId: String, _ name: String) {
+        guard let client else { return }
+        Task {
+            do { try await runBlocking { try client.renameGroup(groupId: groupId, name: name) }; refreshGroups(); persist() }
+            catch { lastError = friendly(error); Haptic.warn() }
+        }
+    }
+
     // MARK: - Contact verification
 
     /// Verification state for `peer` from the Rust core (safety number, verified,
@@ -835,6 +932,15 @@ final class Session: ObservableObject {
             // its results so we don't resurrect a deleted identity's history (M2).
             guard gen == identityGeneration, self.client != nil else { return }
             for m in incoming {
+                if let gid = m.group {
+                    // Group message → the group thread, attributed to the sender (not a
+                    // 1:1 with them; don't add them to contacts/conversations).
+                    let key = Self.groupKey(gid)
+                    messages[key, default: []].append(
+                        ChatMessage(text: m.text, mine: m.from == username, status: .sent, at: Date(), sender: m.from))
+                    if key != activePeer { unread[key, default: 0] += 1 }
+                    continue
+                }
                 startConversation(with: m.from)
                 let appended: Bool
                 if let chunk = Self.decodeChunk(m.text) {
@@ -850,6 +956,9 @@ final class Session: ObservableObject {
                     if security[m.from] == nil { security[m.from] = .encrypted }
                 }
             }
+            // recv() also processes group invites/membership updates (returned as no
+            // message), so refresh the group list every poll (cheap; updates on change).
+            refreshGroups()
             if !incoming.isEmpty { persist() }
             online = true
             lastSynced = Date()

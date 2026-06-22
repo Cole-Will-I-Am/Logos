@@ -59,11 +59,22 @@ impl From<logos_client::ClientError> for LogosError {
     }
 }
 
-/// A received, decrypted message.
+/// A received, decrypted message. `group` is `Some(group_id_hex)` for a group
+/// message (and `from` is the sender within the group), `None` for a 1:1 message.
 #[derive(uniffi::Record)]
 pub struct IncomingMessage {
     pub from: String,
     pub text: String,
+    pub group: Option<String>,
+}
+
+/// Summary of a group the user belongs to (for listing / the group UI).
+#[derive(uniffi::Record)]
+pub struct GroupInfo {
+    pub id: String,
+    pub name: String,
+    pub members: Vec<String>,
+    pub admins: Vec<String>,
 }
 
 /// Per-contact verification state for the verify UI.
@@ -183,6 +194,7 @@ impl LogosClient {
             .map(|m| IncomingMessage {
                 from: m.from,
                 text: m.text,
+                group: m.group,
             })
             .collect())
     }
@@ -224,6 +236,81 @@ impl LogosClient {
             .lock()
             .expect("client lock")
             .reset_session(&peer)?;
+        Ok(())
+    }
+
+    // MARK: - E2EE group chats (sender-key)
+
+    /// Create an E2EE group named `name` with `members` (usernames); returns the
+    /// new group id (hex). The creator is the first admin.
+    pub fn create_group(&self, name: String, members: Vec<String>) -> Result<String, LogosError> {
+        let refs: Vec<&str> = members.iter().map(|s| s.as_str()).collect();
+        Ok(self
+            .inner
+            .lock()
+            .expect("client lock")
+            .create_group(&name, &refs)?)
+    }
+
+    /// Encrypt and fan out `message` to every member of group `group_id` (hex).
+    pub fn send_group(&self, group_id: String, message: String) -> Result<(), LogosError> {
+        self.inner
+            .lock()
+            .expect("client lock")
+            .send_group(&group_id, &message)?;
+        Ok(())
+    }
+
+    /// Groups this client belongs to.
+    pub fn groups(&self) -> Vec<GroupInfo> {
+        self.inner
+            .lock()
+            .expect("client lock")
+            .groups()
+            .into_iter()
+            .map(|g| GroupInfo {
+                id: g.id,
+                name: g.name,
+                members: g.members,
+                admins: g.admins,
+            })
+            .collect()
+    }
+
+    /// Current members of `group_id` (hex), or empty if the group is unknown.
+    pub fn group_members(&self, group_id: String) -> Vec<String> {
+        self.inner
+            .lock()
+            .expect("client lock")
+            .group_members(&group_id)
+            .unwrap_or_default()
+    }
+
+    /// Add `username` to the group (admin only).
+    pub fn add_member(&self, group_id: String, username: String) -> Result<(), LogosError> {
+        self.inner
+            .lock()
+            .expect("client lock")
+            .add_member(&group_id, &username)?;
+        Ok(())
+    }
+
+    /// Remove `username` from the group (admin only); rotates the sender key so the
+    /// removed member can't read future messages.
+    pub fn remove_member(&self, group_id: String, username: String) -> Result<(), LogosError> {
+        self.inner
+            .lock()
+            .expect("client lock")
+            .remove_member(&group_id, &username)?;
+        Ok(())
+    }
+
+    /// Rename the group (admin only).
+    pub fn rename_group(&self, group_id: String, name: String) -> Result<(), LogosError> {
+        self.inner
+            .lock()
+            .expect("client lock")
+            .rename_group(&group_id, &name)?;
         Ok(())
     }
 }

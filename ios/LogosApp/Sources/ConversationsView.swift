@@ -1,9 +1,11 @@
 import SwiftUI
+import LogosKit
 
 struct ConversationsView: View {
     @EnvironmentObject var session: Session
     @AppStorage("ai.assistantName") private var assistantName = AIConfig.defaultAssistantName
     @State private var showCompose = false
+    @State private var showNewGroup = false
     @State private var showContacts = false
     @State private var showExperimental = true
     @State private var showArchived = false
@@ -39,13 +41,17 @@ struct ConversationsView: View {
                     .accessibilityLabel("Contacts")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { Haptic.tap(); showCompose = true } label: {
+                    Menu {
+                        Button { Haptic.tap(); showCompose = true } label: { Label("New chat", systemImage: "bubble.left") }
+                        Button { Haptic.tap(); showNewGroup = true } label: { Label("New group", systemImage: "person.3") }
+                    } label: {
                         Image(systemName: "square.and.pencil").foregroundStyle(LColor.goldText)
                     }
-                    .accessibilityLabel("New chat")
+                    .accessibilityLabel("New chat or group")
                 }
             }
             .sheet(isPresented: $showCompose) { ComposeSheet() }
+            .sheet(isPresented: $showNewGroup) { NewGroupSheet() }
             .sheet(isPresented: $showContacts) { ContactsView() }
         }
     }
@@ -87,6 +93,7 @@ struct ConversationsView: View {
             LazyVStack(spacing: 0) {
                 if showExperimental && query.isEmpty { experimentalBanner }
                 if matchesAIRow { aiRow }
+                ForEach(visibleGroups, id: \.id) { groupRow($0) }
                 ForEach(visible, id: \.self) { row($0) }
                 emptyOrNoMatches
                 if !archivedList.isEmpty { archivedSection }
@@ -98,12 +105,12 @@ struct ConversationsView: View {
     // The AI row is always available, so the centered empty state is replaced by a
     // lighter hint that sits below it.
     @ViewBuilder private var emptyOrNoMatches: some View {
-        if session.conversations.isEmpty && query.isEmpty {
+        if session.conversations.isEmpty && session.groups.isEmpty && query.isEmpty {
             LEmptyState(
                 title: "No conversations yet",
                 message: "Start one with a username — your messages are end-to-end encrypted from the very first hello.")
                 .padding(.top, Space.md)
-        } else if visible.isEmpty && !matchesAIRow {
+        } else if visible.isEmpty && visibleGroups.isEmpty && !matchesAIRow {
             Text(query.isEmpty ? "No active conversations" : "No matches")
                 .font(LFont.subhead).foregroundStyle(LColor.inkTertiary)
                 .frame(maxWidth: .infinity).padding(Space.xl)
@@ -112,6 +119,22 @@ struct ConversationsView: View {
 
     @ViewBuilder private var aiRow: some View {
         NavigationLink { AIChatView() } label: { AIInboxRow() }
+            .buttonStyle(.plain)
+        Divider().background(LColor.hairline).padding(.leading, 78)
+    }
+
+    private var visibleGroups: [GroupInfo] {
+        let gs = session.groups.sorted {
+            session.lastActivity(Session.groupKey($0.id)) > session.lastActivity(Session.groupKey($1.id))
+        }
+        guard !query.isEmpty else { return gs }
+        return gs.filter { g in
+            g.name.localizedCaseInsensitiveContains(query)
+                || (session.groupMessages(g.id).last?.text.localizedCaseInsensitiveContains(query) ?? false)
+        }
+    }
+    @ViewBuilder private func groupRow(_ g: GroupInfo) -> some View {
+        NavigationLink { GroupChatView(groupId: g.id) } label: { GroupRow(group: g) }
             .buttonStyle(.plain)
         Divider().background(LColor.hairline).padding(.leading, 78)
     }
@@ -287,5 +310,57 @@ private struct AIInboxRow: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(name), AI assistant. \(preview)")
+    }
+}
+
+/// Inbox row for an E2EE group chat. Opens `GroupChatView`.
+private struct GroupRow: View {
+    @EnvironmentObject var session: Session
+    let group: GroupInfo
+
+    private var last: ChatMessage? { session.groupMessages(group.id).last }
+    private var unread: Int { session.unread[Session.groupKey(group.id)] ?? 0 }
+    private var preview: String {
+        guard let last else { return "\(group.members.count) member\(group.members.count == 1 ? "" : "s")" }
+        let who = last.mine ? "You" : (last.sender ?? "")
+        let body: String
+        if let att = last.attachment { body = att.isImage ? "📷 Photo" : "📎 " + att.name }
+        else { body = last.text }
+        return who.isEmpty ? body : "\(who): \(body)"
+    }
+
+    var body: some View {
+        HStack(spacing: Space.sm) {
+            ZStack {
+                Circle().fill(LColor.surfaceAlt)
+                Image(systemName: "person.3.fill").font(.system(size: 16)).foregroundStyle(LColor.goldText)
+            }
+            .frame(width: 46, height: 46)
+            .overlay(Circle().strokeBorder(LColor.hairline, lineWidth: 1))
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(group.name).font(LFont.headline).fontWeight(unread > 0 ? .bold : .semibold)
+                        .foregroundStyle(LColor.ink).lineLimit(1)
+                    Spacer(minLength: 0)
+                    if let at = last?.at {
+                        Text(at, style: .time).font(LFont.caption).foregroundStyle(LColor.inkTertiary)
+                    }
+                }
+                Text(preview)
+                    .font(LFont.subhead).fontWeight(unread > 0 ? .medium : .regular)
+                    .foregroundStyle(unread > 0 ? LColor.ink : LColor.inkSecondary)
+                    .lineLimit(1)
+            }
+            if unread > 0 {
+                Text("\(min(unread, 99))")
+                    .font(.system(size: 12, weight: .bold)).foregroundStyle(LColor.onGold)
+                    .padding(.horizontal, 7).padding(.vertical, 2)
+                    .background(LColor.gold, in: Capsule())
+            }
+        }
+        .padding(.horizontal, Space.md).padding(.vertical, Space.sm)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Group \(group.name). \(preview)")
     }
 }
