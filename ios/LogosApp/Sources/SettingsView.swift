@@ -19,6 +19,7 @@ struct SettingsView: View {
                 networkSection
                 aiSection
                 privacySection
+                relayVisibilityLink
                 aboutSection
             }
             .padding(Space.lg)
@@ -209,6 +210,26 @@ struct SettingsView: View {
                          : "Off — use on-device, or add your own Anthropic / OpenAI / Ollama key")
                         .font(LFont.footnote).foregroundStyle(LColor.inkSecondary)
                         .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(LColor.inkTertiary)
+            }
+            .padding(Space.md)
+        }
+        .buttonStyle(.plain)
+        .cardStyle(padding: 0)
+    }
+
+    private var relayVisibilityLink: some View {
+        NavigationLink { RelayVisibilityView() } label: {
+            HStack(spacing: Space.sm) {
+                Image(systemName: "server.rack").font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(LColor.goldText).frame(width: 26)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("What the relay sees").font(LFont.body).foregroundStyle(LColor.ink)
+                    Text("Exactly what the server can and can't observe \u{2014} in plain language")
+                        .font(LFont.footnote).foregroundStyle(LColor.inkSecondary).lineLimit(2)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
