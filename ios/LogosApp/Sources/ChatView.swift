@@ -423,11 +423,21 @@ struct ChatView: View {
             session.mentionAI(in: peer, question: question)
         }
     }
-    /// Drop the "@<name>" token so the model gets just the ask.
+    /// Drop the mention token so the model gets just the ask — whichever form was typed
+    /// ("@Logos AI", "@LogosAI", or "@Logos"). Longest-first so the full name is removed
+    /// whole before the bare first word.
     private func strippedQuestion(_ text: String) -> String {
-        guard let r = text.range(of: "@" + aiName, options: .caseInsensitive) else { return text }
+        let n = aiName.trimmingCharacters(in: .whitespaces)
+        let forms = Set([n, n.replacingOccurrences(of: " ", with: ""),
+                         n.split(separator: " ").first.map(String.init) ?? n])
+            .filter { !$0.isEmpty }.sorted { $0.count > $1.count }
         var q = text
-        q.removeSubrange(r)
+        for f in forms {
+            if let r = q.range(of: "@" + f, options: .caseInsensitive) {
+                q.removeSubrange(r)
+                break
+            }
+        }
         return q.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

@@ -493,16 +493,33 @@ final class Session: ObservableObject {
 
     // MARK: - In-chat @mention ("@<assistant> …" inside a 1:1 thread)
 
-    /// Does `text` tag the assistant by name? Matches "@<assistant name>"
-    /// case-insensitively (the name may contain spaces).
+    /// Does `text` tag the assistant? Accepts what a user actually types,
+    /// case-insensitively: the space-free name ("@LogosAI") or just the FIRST word
+    /// ("@Logos") — which also covers typing the full "@Logos AI" (its first @-token is
+    /// "logos"). Requiring the whole multi-word name made the obvious "@Logos" silently
+    /// do nothing. The "@" must start the message or follow whitespace, so an email like
+    /// "x@logos.com" doesn't trigger, and the handle must end the token (so "@logosity"
+    /// doesn't match "@logos").
     static func mentionsAI(_ text: String, name: String) -> Bool {
         let n = name.trimmingCharacters(in: .whitespaces).lowercased()
         guard !n.isEmpty else { return false }
-        let hay = text.lowercased()
-        if hay.contains("@" + n) { return true }
-        // Tolerate a space-free spelling of a multi-word name (e.g. "@LogosAI" for "Logos AI").
-        let collapsed = n.replacingOccurrences(of: " ", with: "")
-        return collapsed != n && hay.contains("@" + collapsed)
+        var handles: Set<String> = [n.replacingOccurrences(of: " ", with: "")]
+        if let first = n.split(separator: " ").first, first.count >= 2 {
+            handles.insert(String(first)) // "@Logos" tags "Logos AI"
+        }
+        let hay = Array(text.lowercased())
+        var i = 0
+        while i < hay.count {
+            if hay[i] == "@", i == 0 || hay[i - 1].isWhitespace {
+                var j = i + 1
+                while j < hay.count, hay[j].isLetter || hay[j].isNumber || hay[j] == "_" { j += 1 }
+                if handles.contains(String(hay[(i + 1)..<j])) { return true }
+                i = j
+            } else {
+                i += 1
+            }
+        }
+        return false
     }
 
     /// The user tagged the assistant inside their chat with `peer`. Generate an answer
