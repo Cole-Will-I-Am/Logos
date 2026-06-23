@@ -395,7 +395,11 @@ impl WebClient {
             );
         }
 
-        let cert = self.store.cert.clone().ok_or_else(|| "need_cert".to_string())?;
+        let cert = self
+            .store
+            .cert
+            .clone()
+            .ok_or_else(|| "need_cert".to_string())?;
         let session = self
             .store
             .sessions
@@ -450,7 +454,10 @@ impl WebClient {
     /// `export()` BEFORE POSTing the ack (F-07: only delete server-side after the
     /// plaintext is durably processed). `now` is unix seconds (for cert expiry).
     fn process_incoming(&mut self, envelopes_json: &str, now: u64) -> Result<String, String> {
-        let server_vk = self.store.server_vk.ok_or_else(|| "no_server_key".to_string())?;
+        let server_vk = self
+            .store
+            .server_vk
+            .ok_or_else(|| "no_server_key".to_string())?;
         let dh_priv = self.store.dh_priv()?;
         let envs: Vec<StoredEnvelope> =
             serde_json::from_str(envelopes_json).map_err(|e| e.to_string())?;
@@ -595,10 +602,9 @@ impl WebClient {
             None => &self.store.kem_last_resort.secret_hex,
             Some(pos) => &self.store.kem_one_time[pos].secret_hex,
         };
-        let kem_secret = KemSecret::from_bytes(
-            &hex::decode(kem_secret_hex).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+        let kem_secret =
+            KemSecret::from_bytes(&hex::decode(kem_secret_hex).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
 
         let id = self.store.identity()?;
         let spk_priv = hex32(&self.store.signed_prekey.secret_hex)?;
@@ -714,11 +720,15 @@ impl WasmClient {
     }
 
     pub fn identity_ed_hex(&self) -> Result<String, JsValue> {
-        Ok(hex::encode(self.inner.store.identity().map_err(jserr)?.public().ed))
+        Ok(hex::encode(
+            self.inner.store.identity().map_err(jserr)?.public().ed,
+        ))
     }
 
     pub fn identity_dh_hex(&self) -> Result<String, JsValue> {
-        Ok(hex::encode(self.inner.store.identity().map_err(jserr)?.public().dh))
+        Ok(hex::encode(
+            self.inner.store.identity().map_err(jserr)?.public().dh,
+        ))
     }
 
     /// Usernames of peers we have an open session with (for the conversation list).
@@ -843,7 +853,9 @@ mod tests {
     fn give_cert(client: &mut WebClient, server_seed: &[u8; 32], username: &str) {
         let id = client.store.identity().unwrap();
         let cert = issue_certificate(server_seed, username, &id.public(), 9_999_999_999);
-        client.set_cert(&serde_json::to_string(&cert).unwrap()).unwrap();
+        client
+            .set_cert(&serde_json::to_string(&cert).unwrap())
+            .unwrap();
     }
 
     fn server_key_json(vk: &[u8; 32]) -> String {
@@ -878,9 +890,11 @@ mod tests {
             .unwrap();
         alice.confirm_sent("bob");
 
-        let out: serde_json::Value =
-            serde_json::from_str(&bob.process_incoming(&as_envelopes(&prepared, 1), now).unwrap())
-                .unwrap();
+        let out: serde_json::Value = serde_json::from_str(
+            &bob.process_incoming(&as_envelopes(&prepared, 1), now)
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(out["messages"][0]["from"], "alice");
         assert_eq!(out["messages"][0]["text"], "hi bob, it's alice");
         assert_eq!(out["ack_ids"][0], 1);
@@ -901,9 +915,11 @@ mod tests {
         // --- Alice sends a second message (Normal path, established session) ---
         let prepared = alice.prepare_send("bob", None, "how's it going?").unwrap();
         alice.confirm_sent("bob");
-        let out: serde_json::Value =
-            serde_json::from_str(&bob.process_incoming(&as_envelopes(&prepared, 3), now).unwrap())
-                .unwrap();
+        let out: serde_json::Value = serde_json::from_str(
+            &bob.process_incoming(&as_envelopes(&prepared, 3), now)
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(out["messages"][0]["text"], "how's it going?");
 
         // --- Safety numbers agree on both sides (symmetric) ---
@@ -922,7 +938,9 @@ mod tests {
         give_cert(&mut alice, &server_seed, "alice");
 
         let bob_bundle = bundle_from_registration(&bob_reg).to_string();
-        let prepared = alice.prepare_send("bob", Some(&bob_bundle), "once").unwrap();
+        let prepared = alice
+            .prepare_send("bob", Some(&bob_bundle), "once")
+            .unwrap();
         let envs = as_envelopes(&prepared, 1);
 
         // First delivery is accepted.
@@ -947,7 +965,9 @@ mod tests {
         give_cert(&mut alice, &server_seed, "alice");
 
         let bob_bundle = bundle_from_registration(&bob_reg).to_string();
-        let p1 = alice.prepare_send("bob", Some(&bob_bundle), "first").unwrap();
+        let p1 = alice
+            .prepare_send("bob", Some(&bob_bundle), "first")
+            .unwrap();
         alice.confirm_sent("bob");
         bob.process_incoming(&as_envelopes(&p1, 1), now).unwrap();
 
