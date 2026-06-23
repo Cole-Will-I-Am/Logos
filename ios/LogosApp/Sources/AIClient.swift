@@ -179,15 +179,45 @@ enum AIClient {
         let convo = recent
             .map { ($0.aiAuthor ?? ($0.mine ? meName : peerName)) + ": " + $0.text }
             .joined(separator: "\n")
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
         let system = """
         You are \(assistantName), an AI assistant helping inside a private, end-to-end-encrypted \
-        chat between \(meName) and \(peerName). \(meName) tagged you with @\(assistantName) to ask \
-        something, and your reply is posted into the conversation for both to read. Be helpful and \
-        concise, use the recent messages for context, and don't invent facts.
+        chat between \(meName) and \(peerName). \(meName) tagged you with @\(assistantName), and your \
+        reply is posted into the conversation for both to read. Use the whole conversation for \
+        context, address whoever is relevant, be helpful and concise, and don't invent facts.
         """
+        // An empty question means "weigh in on the conversation so far".
+        let ask = q.isEmpty
+            ? "\(meName) tagged you to weigh in — respond to the conversation above."
+            : "\(meName) asked you: \(q)"
         let user = convo.isEmpty
-            ? question
-            : "Recent conversation:\n\(convo)\n\n\(meName) asked you: \(question)"
+            ? (q.isEmpty ? "Introduce yourself briefly." : q)
+            : "Conversation so far:\n\(convo)\n\n\(ask)"
+        return try await complete(system: system, user: user)
+    }
+
+    /// Answer an in-chat @mention inside a GROUP. The assistant sees the member roster and
+    /// the whole transcript (attributed per sender), and its reply is posted to the group.
+    /// Reuses the one-shot `complete` path, so it works for every provider (incl. on-device).
+    static func answerInGroup(assistantName: String, meName: String, groupName: String,
+                              members: [String], transcript: [ChatMessage], question: String) async throws -> String {
+        let convo = transcript
+            .map { ($0.aiAuthor ?? ($0.mine ? meName : ($0.sender ?? "Member"))) + ": " + $0.text }
+            .joined(separator: "\n")
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        let roster = members.isEmpty ? "" : " Members: \(members.joined(separator: ", "))."
+        let system = """
+        You are \(assistantName), an AI assistant inside a private, end-to-end-encrypted group chat \
+        called "\(groupName)".\(roster) \(meName) tagged you with @\(assistantName), and your reply is \
+        posted into the group for everyone to read. Use the whole conversation for context, address \
+        whoever is relevant by name, be helpful and concise, and don't invent facts.
+        """
+        let ask = q.isEmpty
+            ? "\(meName) tagged you to weigh in — respond to the conversation above."
+            : "\(meName) asked you: \(q)"
+        let user = convo.isEmpty
+            ? (q.isEmpty ? "Introduce yourself briefly to the group." : q)
+            : "Conversation so far:\n\(convo)\n\n\(ask)"
         return try await complete(system: system, user: user)
     }
 

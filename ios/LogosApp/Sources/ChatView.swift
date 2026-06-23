@@ -15,7 +15,6 @@ struct ChatView: View {
     @State private var showPhotoPicker = false
     @State private var photoItem: PhotosPickerItem?
     @State private var showFileImporter = false
-    @State private var aiSetupPrompt = false
     @State private var showAISettings = false
     @State private var showBlockConfirm = false
     @State private var showReportConfirm = false
@@ -118,12 +117,6 @@ struct ChatView: View {
         }
         .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
             if case .success(let urls) = result, let url = urls.first { sendFile(url) }
-        }
-        .alert("Set up \(aiName)?", isPresented: $aiSetupPrompt) {
-            Button("Set up AI") { showAISettings = true }
-            Button("Not now", role: .cancel) {}
-        } message: {
-            Text("To ask your AI right in a chat with @\(aiName), add a provider — free on-device, or your own key — in Settings → AI.")
         }
         .sheet(isPresented: $showAISettings) { AISettingsView() }
     }
@@ -421,7 +414,7 @@ struct ChatView: View {
     /// (gated by cloud consent). On-device answers immediately; cloud asks once.
     private func maybeAskAI(_ text: String) {
         guard Session.mentionsAI(text, name: aiName) else { return }
-        guard provider != .none else { aiSetupPrompt = true; return }   // feedback, not silence
+        guard provider != .none else { showAISettings = true; return }   // feedback, not silence
         let question = strippedQuestion(text)
         if provider.isCloud && !AIConfig.inChatCloudConsented {
             pendingQuestion = question

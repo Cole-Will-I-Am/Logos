@@ -9,6 +9,10 @@ struct GroupChatView: View {
     let groupId: String
     @State private var draft = ""
     @State private var showInfo = false
+    @AppStorage("ai.assistantName") private var assistantName = AIConfig.defaultAssistantName
+    @State private var showCloudConsent = false
+    @State private var pendingQuestion = ""
+    @State private var showAISettings = false
     @FocusState private var composerFocused: Bool
 
     private var key: String { Session.groupKey(groupId) }
@@ -16,6 +20,11 @@ struct GroupChatView: View {
     private var info: GroupInfo? { session.group(groupId) }
     private var title: String { info?.name ?? "Group" }
     private var memberCount: Int { info?.members.count ?? 0 }
+    private var provider: AIProvider { AIConfig.effectiveProvider }
+    private var aiName: String {
+        let t = assistantName.trimmingCharacters(in: .whitespaces)
+        return t.isEmpty ? AIConfig.defaultAssistantName : t
+    }
 
     var body: some View {
         VStack(spacing: 0) { thread; composer }
@@ -23,7 +32,7 @@ struct GroupChatView: View {
             .safeAreaInset(edge: .top) { if !session.online { OfflineBanner { session.syncNow() } } }
             .animation(Motion.standard, value: session.online)
             .navigationBarTitleDisplayMode(.inline)
-            .onAppear { session.setActive(key) }
+            .onAppear { session.setActive(key); session.aiMentionError = nil }
             .onDisappear { session.setActive(nil) }
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -43,6 +52,17 @@ struct GroupChatView: View {
                 }
             }
             .sheet(isPresented: $showInfo) { GroupInfoView(groupId: groupId).environmentObject(session) }
+            .sheet(isPresented: $showAISettings) { AISettingsView() }
+            .alert("Use \(aiName) in this group?", isPresented: $showCloudConsent) {
+                Button("Allow once") { session.mentionAIInGroup(in: groupId, question: pendingQuestion) }
+                Button("Allow & don’t ask again") {
+                    AIConfig.inChatCloudConsented = true
+                    session.mentionAIInGroup(in: groupId, question: pendingQuestion)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("The group’s recent messages will be sent to \(provider.label) to answer, leaving end-to-end encryption (the Logos relay still never sees them). On-device AI keeps everything private.")
+            }
     }
 
     private var thread: some View {
@@ -51,15 +71,21 @@ struct GroupChatView: View {
                 LazyVStack(spacing: Space.xs) {
                     intro
                     ForEach(msgs) { msg in
-                        MessageBubble(message: msg) { session.retryGroup(msg.id, in: groupId) }
+                        MessageBubble(message: msg, markdown: msg.aiAuthor != nil) { session.retryGroup(msg.id, in: groupId) }
                             .id(msg.id)
                     }
+                    if session.aiMentionPending.contains(key) { TypingBubble().id("ai-typing") }
                 }
                 .padding(.horizontal, Space.md).padding(.vertical, Space.sm)
             }
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: msgs.count) { _ in
                 if let last = msgs.last { withAnimation(Motion.standard) { proxy.scrollTo(last.id, anchor: .bottom) } }
+            }
+            .onChange(of: session.aiMentionPending) { _ in
+                if session.aiMentionPending.contains(key) {
+                    withAnimation(Motion.standard) { proxy.scrollTo("ai-typing", anchor: .bottom) }
+                }
             }
             .onAppear { if let last = msgs.last { proxy.scrollTo(last.id, anchor: .bottom) } }
         }
@@ -84,10 +110,13 @@ struct GroupChatView: View {
 
     private var composer: some View {
         VStack(spacing: 0) {
+            aiErrorBanner
+            mentionSuggestion
             Divider().background(LColor.hairline)
             HStack(alignment: .bottom, spacing: Space.xs) {
                 TextField("Message", text: $draft, axis: .vertical)
                     .focused($composerFocused).lineLimit(1...6).font(LFont.body)
+                    .onChange(of: draft) { _ in collapseDoubledAts() }
                     .padding(.horizontal, Space.sm).padding(.vertical, 9)
                     .background(LColor.surfaceAlt)
                     .clipShape(RoundedRectangle(cornerRadius: Radius.bubble, style: .continuous))
@@ -95,6 +124,7 @@ struct GroupChatView: View {
                     let t = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !t.isEmpty else { return }
                     draft = ""; Haptic.send(); session.sendToGroup(groupId, text: t)
+                    maybeAskAI(t)
                 } label: {
                     Image(systemName: "arrow.up").font(.system(size: 16, weight: .bold))
                         .foregroundStyle(LColor.onGold).frame(width: 36, height: 36)
@@ -106,6 +136,94 @@ struct GroupChatView: View {
         }
     }
     private var canSend: Bool { !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    // MARK: - In-chat @mention (group)
+
+    /// The text after the last "@" the user is currently typing (nil if none / spans a newline).
+    private var mentionFragment: String? {
+        guard let at = draft.lastIndex(of: "@") else { return nil }
+        let frag = String(draft[draft.index(after: at)...])
+        return frag.contains("\n") ? nil : frag
+    }
+    private var showMentionSuggestion: Bool {
+        guard provider != .none, let frag = mentionFragment else { return false }
+        if Session.mentionsAI(draft, name: aiName) { return false }
+        return aiName.lowercased().hasPrefix(frag.lowercased())
+    }
+
+    /// Surfaces an in-group @mention failure (provider/network/etc.) instead of swallowing it.
+    @ViewBuilder private var aiErrorBanner: some View {
+        if let e = session.aiMentionError {
+            LBanner(tone: .danger, icon: "exclamationmark.triangle.fill",
+                    title: "\(aiName) couldn’t answer", message: e,
+                    actionTitle: "Dismiss", action: { session.aiMentionError = nil })
+                .padding(.horizontal, Space.md).padding(.vertical, Space.xs)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
+    @ViewBuilder private var mentionSuggestion: some View {
+        if showMentionSuggestion {
+            Button(action: insertMention) {
+                HStack(spacing: Space.sm) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(LColor.onGold)
+                        .frame(width: 26, height: 26).background(LColor.gold, in: Circle())
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(aiName).font(LFont.subhead.weight(.semibold)).foregroundStyle(LColor.ink)
+                        Text("Ask your AI here — everyone in the group sees the reply")
+                            .font(LFont.caption).foregroundStyle(LColor.inkTertiary)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.up.left.circle.fill")
+                        .font(.system(size: 18)).foregroundStyle(LColor.goldText)
+                }
+                .padding(.horizontal, Space.md).padding(.vertical, Space.xs)
+                .background(LColor.surface)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
+    private func insertMention() {
+        guard let at = draft.lastIndex(of: "@") else { return }
+        var head = String(draft[..<at])
+        while head.last == "@" { head.removeLast() }   // never produce "@@"
+        draft = head + "@\(aiName) "
+        Haptic.tap()
+    }
+    /// Collapse an accidental run of "@@" down to a single "@", live as the user types.
+    private func collapseDoubledAts() {
+        guard draft.contains("@@") else { return }
+        var s = draft
+        while s.contains("@@") { s = s.replacingOccurrences(of: "@@", with: "@") }
+        draft = s
+    }
+
+    /// If the just-sent message tags the assistant, generate a group answer (gated by cloud
+    /// consent). On-device/Ollama answer immediately; cloud asks once. An empty question is
+    /// allowed — it means "weigh in on the conversation".
+    private func maybeAskAI(_ text: String) {
+        guard Session.mentionsAI(text, name: aiName) else { return }
+        guard provider != .none else { showAISettings = true; return }
+        let question = strippedQuestion(text)
+        if provider.isCloud && !AIConfig.inChatCloudConsented {
+            pendingQuestion = question
+            showCloudConsent = true
+        } else {
+            session.mentionAIInGroup(in: groupId, question: question)
+        }
+    }
+    /// Drop the "@<name>" token so the model gets just the ask.
+    private func strippedQuestion(_ text: String) -> String {
+        guard let r = text.range(of: "@" + aiName, options: .caseInsensitive) else { return text }
+        var q = text
+        q.removeSubrange(r)
+        return q.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 // MARK: - Group info / member management

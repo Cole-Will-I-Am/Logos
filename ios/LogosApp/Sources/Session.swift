@@ -496,9 +496,13 @@ final class Session: ObservableObject {
     /// Does `text` tag the assistant by name? Matches "@<assistant name>"
     /// case-insensitively (the name may contain spaces).
     static func mentionsAI(_ text: String, name: String) -> Bool {
-        let n = name.trimmingCharacters(in: .whitespaces)
+        let n = name.trimmingCharacters(in: .whitespaces).lowercased()
         guard !n.isEmpty else { return false }
-        return text.lowercased().contains("@" + n.lowercased())
+        let hay = text.lowercased()
+        if hay.contains("@" + n) { return true }
+        // Tolerate a space-free spelling of a multi-word name (e.g. "@LogosAI" for "Logos AI").
+        let collapsed = n.replacingOccurrences(of: " ", with: "")
+        return collapsed != n && hay.contains("@" + collapsed)
     }
 
     /// The user tagged the assistant inside their chat with `peer`. Generate an answer
@@ -507,21 +511,66 @@ final class Session: ObservableObject {
     /// relay only ever sees ciphertext. Caller handles cloud consent before calling.
     func mentionAI(in peer: String, question: String) {
         let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard client != nil, !q.isEmpty, !aiMentionPending.contains(peer) else { return }
+        // An empty question is allowed: tagging the assistant with no follow-up means
+        // "weigh in on the conversation". Only require a client and no in-flight ask.
+        guard client != nil, !aiMentionPending.contains(peer) else { return }
         aiMentionError = nil
         aiMentionPending.insert(peer)
         let name = AIConfig.assistantName
         let me = username ?? "Me"
         let peerName = displayName(for: peer)
-        let recent = Array((messages[peer] ?? []).suffix(40))
+        // The assistant reads the WHOLE thread (not just the tail) so it can answer about
+        // anything said earlier in the conversation.
+        let transcript = messages[peer] ?? []
         Task {
             do {
                 let answer = try await AIClient.answerInChat(
-                    assistantName: name, meName: me, peerName: peerName, recent: recent, question: q)
+                    assistantName: name, meName: me, peerName: peerName, recent: transcript, question: q)
                 aiMentionPending.remove(peer)
-                sendAIAnswer(to: peer, name: name, answer: answer)
+                let clean = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !clean.isEmpty else {
+                    aiMentionError = "\(name) returned an empty reply. Try a different model in Settings → AI."
+                    Haptic.warn(); return
+                }
+                sendAIAnswer(to: peer, name: name, answer: clean)
             } catch {
                 aiMentionPending.remove(peer)
+                aiMentionError = (error as? AIError)?.errorDescription ?? error.localizedDescription
+                Haptic.warn()
+            }
+        }
+    }
+
+    /// The user tagged the assistant inside a GROUP. The assistant reads the whole group
+    /// transcript (every member's messages, attributed by sender) and posts one reply into
+    /// the group for all members to see. Same privacy posture as 1:1 — the relay only ever
+    /// sees ciphertext; cloud providers see the transcript only after the sender consents.
+    func mentionAIInGroup(in groupId: String, question: String) {
+        let key = Self.groupKey(groupId)
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard client != nil, !aiMentionPending.contains(key) else { return }
+        aiMentionError = nil
+        aiMentionPending.insert(key)
+        let name = AIConfig.assistantName
+        let me = username ?? "Me"
+        let info = group(groupId)
+        let groupName = info?.name ?? "the group"
+        let members = info?.members ?? []
+        let transcript = messages[key] ?? []
+        Task {
+            do {
+                let answer = try await AIClient.answerInGroup(
+                    assistantName: name, meName: me, groupName: groupName,
+                    members: members, transcript: transcript, question: q)
+                aiMentionPending.remove(key)
+                let clean = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !clean.isEmpty else {
+                    aiMentionError = "\(name) returned an empty reply. Try a different model in Settings → AI."
+                    Haptic.warn(); return
+                }
+                sendAIAnswerToGroup(groupId, name: name, answer: clean)
+            } catch {
+                aiMentionPending.remove(key)
                 aiMentionError = (error as? AIError)?.errorDescription ?? error.localizedDescription
                 Haptic.warn()
             }
@@ -537,6 +586,27 @@ final class Session: ObservableObject {
         let msg = ChatMessage(text: answer, mine: true, status: .sending, at: Date(), aiAuthor: name)
         messages[peer, default: []].append(msg)
         deliver(msg.id, to: peer, text: wire)
+    }
+
+    /// Post an AI answer into a group thread: a local assistant-attributed bubble, and on
+    /// the wire a normal E2EE group message labeled with the assistant name (the AI has no
+    /// network identity, so the label travels in the text — every member sees the reply).
+    private func sendAIAnswerToGroup(_ groupId: String, name: String, answer: String) {
+        guard let client else { return }
+        let key = Self.groupKey(groupId)
+        let wire = "✦ \(name): \(answer)"
+        let msg = ChatMessage(text: answer, mine: true, status: .sending, at: Date(), aiAuthor: name)
+        messages[key, default: []].append(msg)
+        let id = msg.id
+        Task {
+            do {
+                try await runBlocking { try client.sendGroup(groupId: groupId, message: wire) }
+                setStatus(id, in: key, .sent)
+            } catch {
+                setStatus(id, in: key, .failed("Couldn’t send to the group. Tap to retry."))
+                lastError = friendly(error)
+            }
+        }
     }
 
     // MARK: - Attachments (photos / files; E2EE over the normal message path, no relay/FFI change)
