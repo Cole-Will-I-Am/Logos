@@ -98,23 +98,21 @@
         </div>
       </div>
 
-      <!-- right column: chat preview -->
-      <div class="chat">
-        <div class="head">
-          <div style="font-weight:700">Conversations</div>
-          <div class="tiny">Your identity is live on the relay — iOS users can already find you.</div>
-        </div>
-        <div class="body">
-          <div class="inner">
-            <div style="font-size:34px;margin-bottom:8px">✉️</div>
-            <h2 style="margin-bottom:6px">Secure messaging is almost here</h2>
-            <p class="small muted">You’re registered and discoverable. Sending and receiving messages — the PQXDH handshake, Double Ratchet, and sealed-sender delivery — is the next piece landing in the browser. Everything runs locally; nothing decrypts on a server.</p>
+      <!-- right column: live chat -->
+      <div class="chat" id="chat">
+        <div class="head" id="chat-head">
+          <button class="backbtn hidden" id="chat-back" title="Back to conversations" aria-label="Back">‹</button>
+          <div class="head-main">
+            <div class="head-title" id="chat-title">Conversations</div>
+            <div class="tiny" id="chat-sub">End-to-end encrypted · post-quantum · sealed sender</div>
           </div>
+          <span class="poll-dot" id="poll-dot" title="Listening for messages"></span>
         </div>
-        <div class="composer">
-          <input disabled placeholder="Messaging rolls out next…">
-          <button disabled>Send</button>
-        </div>
+        <div class="body chatbody" id="chat-body"><!-- rendered by app.js --></div>
+        <form class="composer" id="composer" autocomplete="off">
+          <input id="composer-input" placeholder="Open a conversation to start…" autocomplete="off" autocapitalize="sentences" disabled>
+          <button id="composer-send" type="submit" disabled>Send</button>
+        </form>
       </div>
 
     </div>

@@ -8,7 +8,8 @@ repository.workspace = true
 # Browser/WASM surface for the Logos web client. Mirrors how `logos-ffi` exposes
 # the engine to iOS — same crypto crates, no reimplementation — but targets
 # wasm32 + wasm-bindgen so the protocol runs in the browser with keys that never
-# leave the device. Phase 1: identity + registration. Send/recv land next.
+# leave the device. Phase 1: identity + registration. Phase 2: 1:1 messaging
+# (PQXDH + Double Ratchet + sealed sender) via the stateful `WasmClient`.
 [lib]
 crate-type = ["cdylib", "rlib"]
 
@@ -21,6 +22,7 @@ logos-proto.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 hex.workspace = true
+sha2.workspace = true
 wasm-bindgen = "0.2"
 
 # Enable getrandom's browser backend ONLY on wasm builds, so the workspace's
@@ -29,6 +31,11 @@ wasm-bindgen = "0.2"
 # uses the `js` feature) and 0.4 (ml-kem's rand_core path, uses the newer
 # `wasm_js` feature + the `getrandom_backend="wasm_js"` cfg set via RUSTFLAGS at
 # build time). Both are flipped to the browser backend here for wasm32 only.
+# Native-only: the round-trip tests stand up a mock relay (ed25519 cert signer).
+[dev-dependencies]
+ed25519-dalek.workspace = true
+rand.workspace = true
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }

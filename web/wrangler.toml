@@ -6,10 +6,17 @@ workers_dev = true
 # Static web client assets, served by the Worker. Single-page app: unknown
 # non-asset paths fall back to index.html. The Worker intercepts /v1/* before
 # assets to proxy the relay.
+#
+# `run_worker_first = true` is REQUIRED: otherwise Cloudflare serves static
+# assets directly and skips worker.js, so the strict CSP + security headers
+# (worker.js wraps every asset response with them) would never reach the browser
+# — and the CSP is the primary XSS control, which matters precisely because keys
+# live in the browser. With this set, worker.js is the front door for all requests.
 [assets]
 directory = "./public"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
+run_worker_first = true
 
 # Serve at logos.manticthink.com (managed in the same Cloudflare account/zone as
 # db8 and the relay).

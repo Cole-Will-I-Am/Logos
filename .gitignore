@@ -19,5 +19,7 @@ ios/LogosApp/*.xcodeproj/
 web/public/wasm/
 web/public/logos-icon.png
 web/public/logos-wordmark.png
+# wrangler local state/cache
+web/.wrangler/
 # local dev handoff notes — keep out of the public repo
 web/HANDOFF.md

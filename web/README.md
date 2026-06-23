@@ -54,13 +54,26 @@ CLOUDFLARE_API_TOKEN=… npx wrangler deploy
 
 ## Status
 
+Live at **https://logos.manticthink.com**.
+
 **Phase 1 (done):** in-browser identity creation → registration to the relay →
 recovery seed; identity persisted locally (secret material AES-GCM-encrypted at
 rest); peer lookup + safety-number comparison.
 
-**Phase 2 (next):** messaging — the PQXDH handshake, Double Ratchet, and
-sealed-sender send/receive over the relay, with per-conversation session state.
-See `crates/logos-ffi/src/lib.rs` for the API surface being mirrored.
+**Phase 2 (done):** 1:1 end-to-end-encrypted messaging — the PQXDH handshake,
+Double Ratchet, and sealed-sender send/receive over the relay, with
+per-conversation session state. The stateful `WasmClient` (in `crates/logos-wasm`)
+owns the crypto and ratchet sessions; JS owns transport and persistence. Send and
+receive are split into pure-compute steps (`prepare_send` / `process_incoming`)
+with JS doing the async relay `fetch` between them, so the engine stays
+synchronous and wasm-friendly. Every wire type comes from `logos-proto`, so the
+bytes are identical to iOS by construction. Verified three ways: a native Rust
+round-trip test, a Node integration test against the live relay, and a headless
+Chromium UI test (two users, under the production CSP).
+
+**Phase 3 (next):** groups (sender-key), attachments, the AI layer — plus the
+remaining hardening (passphrase-derived at-rest key, restore-from-seed, BIP39
+24-word phrase, one-time-prekey replenishment). See `HANDOFF.md`.
 
 ## A note on "private" on the web
 
