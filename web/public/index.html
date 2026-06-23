@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Logos — private, end-to-end encrypted messaging</title>
+<link rel="canonical" href="https://logos.manticthink.com/">
+<meta name="description" content="Logos is an end-to-end encrypted, post-quantum messenger. Create an identity in your browser — keys never leave your device — and reach people on the Logos iOS app.">
+<meta name="theme-color" content="#FAF7F1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#15120D" media="(prefers-color-scheme: dark)">
+<link rel="icon" type="image/png" href="/logos-icon.png">
+<link rel="apple-touch-icon" href="/logos-icon.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Logos — private, end-to-end encrypted messaging">
+<meta property="og:description" content="Post-quantum E2EE messaging. Your keys are generated in your browser and never leave your device.">
+<meta property="og:url" content="https://logos.manticthink.com/">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <img class="mark" src="/logos-icon.png" alt="">
+  <span class="word">Logos</span>
+  <span class="pill">end-to-end encrypted</span>
+  <span class="spacer"></span>
+  <span class="who" id="whoami" hidden>signed in as <b id="whoami-name"></b></span>
+</header>
+
+<main class="wrap">
+
+  <!-- ============ ONBOARDING ============ -->
+  <section id="view-onboard" class="center">
+    <h1>Talk in private.</h1>
+    <p class="lede">End-to-end encrypted messages with post-quantum key exchange — and no phone number. Reach anyone on the Logos iOS app from right here in your browser.</p>
+
+    <div class="card">
+      <h2>Create your identity</h2>
+      <label for="username">Pick a username</label>
+      <div class="field">
+        <span class="at">@</span>
+        <input id="username" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="yourname" maxlength="32">
+      </div>
+      <div class="hint" id="username-hint"></div>
+
+      <button class="primary" id="create-btn" disabled>Create my identity</button>
+
+      <div class="note" style="margin-top:18px">
+        <span class="ico">🔐</span>
+        <span>Your keys are generated <b>here, in your browser</b>, and never sent to any server. The relay only ever sees public keys and sealed, unreadable envelopes.</span>
+      </div>
+    </div>
+
+    <p class="tiny" style="text-align:center;margin-top:18px">Already have an account on the iOS app? Cross-device restore is coming next — for now, create a fresh web identity.</p>
+  </section>
+
+  <!-- ============ RECOVERY (after create) ============ -->
+  <section id="view-recovery" class="center hidden">
+    <div class="card">
+      <h2>Save your recovery secret</h2>
+      <p class="small muted">This 32-byte seed is the <b>only</b> way to recover <span class="mono" id="rec-username"></span> if you lose this browser. Write it down and keep it somewhere safe. We can’t recover it for you.</p>
+      <div class="seedbox" id="rec-seed"></div>
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button class="ghost" id="rec-copy">Copy</button>
+      </div>
+      <button class="primary" id="rec-done">I’ve saved it — continue</button>
+      <p class="tiny" style="margin-top:12px">Recovery as a 24-word phrase (matching the iOS app) is on the way; the seed above restores the same identity.</p>
+    </div>
+  </section>
+
+  <!-- ============ APP ============ -->
+  <section id="view-app" class="hidden">
+    <div class="split">
+
+      <!-- left column: identity + lookup -->
+      <div>
+        <div class="card">
+          <div class="idrow">
+            <div class="avatar" id="me-avatar">?</div>
+            <div>
+              <div style="font-weight:700;font-size:16px">@<span id="me-name"></span></div>
+              <div class="tiny">Your Logos identity</div>
+            </div>
+          </div>
+          <div class="kv">Identity key<br><span class="mono" id="me-fpr"></span></div>
+          <div class="kv">Mailbox<br><span class="mono" id="me-mailbox"></span></div>
+          <div class="divider"></div>
+          <button class="ghost" id="me-seed-btn" style="width:100%">Show recovery secret</button>
+        </div>
+
+        <div class="card">
+          <h2>Find someone</h2>
+          <p class="small muted" style="margin-top:-4px">Look up anyone registered on Logos (including iOS users) and check their safety number.</p>
+          <div class="field">
+            <span class="at">@</span>
+            <input id="lookup" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="username">
+          </div>
+          <button class="primary" id="lookup-btn">Look up</button>
+          <div class="peer-result hidden" id="peer-result"></div>
+        </div>
+      </div>
+
+      <!-- right column: chat preview -->
+      <div class="chat">
+        <div class="head">
+          <div style="font-weight:700">Conversations</div>
+          <div class="tiny">Your identity is live on the relay — iOS users can already find you.</div>
+        </div>
+        <div class="body">
+          <div class="inner">
+            <div style="font-size:34px;margin-bottom:8px">✉️</div>
+            <h2 style="margin-bottom:6px">Secure messaging is almost here</h2>
+            <p class="small muted">You’re registered and discoverable. Sending and receiving messages — the PQXDH handshake, Double Ratchet, and sealed-sender delivery — is the next piece landing in the browser. Everything runs locally; nothing decrypts on a server.</p>
+          </div>
+        </div>
+        <div class="composer">
+          <input disabled placeholder="Messaging rolls out next…">
+          <button disabled>Send</button>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- loading -->
+  <section id="view-loading" class="center hidden">
+    <div class="card" style="text-align:center"><span class="spin"></span> <span class="muted">Loading secure core…</span></div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="warn">EXPERIMENTAL · UNAUDITED</div>
+  <div style="margin-top:6px">Logos · post-quantum, end-to-end encrypted · keys never leave your device</div>
+</footer>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

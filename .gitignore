@@ -14,3 +14,10 @@ ios/LogosKit/LogosFFI.xcframework/
 ios/LogosApp/*.xcodeproj/
 .build/
 .swiftpm/
+
+# generated/built web client artifacts (produced by web/build-wasm.sh)
+web/public/wasm/
+web/public/logos-icon.png
+web/public/logos-wordmark.png
+# local dev handoff notes — keep out of the public repo
+web/HANDOFF.md

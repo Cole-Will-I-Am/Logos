@@ -776,9 +776,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1308,6 +1310,23 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "logos-wasm"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "getrandom 0.4.3",
+ "hex",
+ "logos-identity",
+ "logos-pqxdh",
+ "logos-proto",
+ "logos-ratchet",
+ "logos-sealed",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]

@@ -1,0 +1,18 @@
+name = "logos-web"
+main = "worker.js"
+compatibility_date = "2026-06-01"
+workers_dev = true
+
+# Static web client assets, served by the Worker. Single-page app: unknown
+# non-asset paths fall back to index.html. The Worker intercepts /v1/* before
+# assets to proxy the relay.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# Serve at logos.manticthink.com (managed in the same Cloudflare account/zone as
+# db8 and the relay).
+[[routes]]
+pattern = "logos.manticthink.com"
+custom_domain = true
