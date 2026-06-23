@@ -40,7 +40,12 @@ enum AIConfig {
     }
     static func model(for p: AIProvider) -> String {
         let m = d.string(forKey: "ai.model.\(p.rawValue)")?.trimmingCharacters(in: .whitespaces)
-        return (m?.isEmpty == false) ? m! : p.defaultModel
+        if let m, !m.isEmpty { return m }
+        // Ollama Cloud (ollama.com) does NOT serve "llama3.1" (p.defaultModel) — that
+        // 404s and the AI silently fails. Use a valid cloud model there; a custom
+        // self-hosted endpoint still gets the local default.
+        if p == .ollama, ollamaBase.contains("ollama.com") { return "gpt-oss:120b" }
+        return p.defaultModel
     }
     static func setModel(_ m: String, for p: AIProvider) {
         d.set(m.trimmingCharacters(in: .whitespaces), forKey: "ai.model.\(p.rawValue)")

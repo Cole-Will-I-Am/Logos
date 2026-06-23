@@ -4,6 +4,7 @@ enum AIError: LocalizedError {
     case notConfigured
     case onDeviceUnavailable
     case http(Int, String)
+    case provider(String)   // provider returned an error payload (often in an HTTP-200 body, e.g. Ollama "model not found")
     case badResponse
     case network(String)
 
@@ -12,6 +13,7 @@ enum AIError: LocalizedError {
         case .notConfigured: return "No AI provider is set up. Add a key in Settings → AI."
         case .onDeviceUnavailable: return "On-device AI isn't available here. Add your own key in Settings → AI, or try on an Apple-Intelligence device running iOS 26."
         case .http(let code, let msg): return "Provider error \(code): \(msg)"
+        case .provider(let m): return m
         case .badResponse: return "Couldn't read the provider's response."
         case .network(let m): return m
         }
@@ -63,6 +65,16 @@ enum AIClient {
     private static func json(_ data: Data) throws -> [String: Any] {
         guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw AIError.badResponse
+        }
+        // Some providers (notably Ollama) return HTTP 200 with an error in the body —
+        // e.g. {"error":"model 'x' not found"} — which would otherwise slip past the
+        // status check and surface as a generic "couldn't read response". Surface the
+        // real message so a bad model/key/endpoint is diagnosable, for every provider.
+        if let e = o["error"] {
+            let msg = (e as? String)
+                ?? ((e as? [String: Any])?["message"] as? String)
+                ?? "The provider returned an error."
+            throw AIError.provider(msg)
         }
         return o
     }
