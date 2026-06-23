@@ -488,16 +488,17 @@ function wireApp() {
       const peerDh = bytesToHex(id.dh);
       const sn = compute_safety_number(CLIENT.identity_ed_hex(), CLIENT.identity_dh_hex(), peerEd, peerDh);
       const self = name === CLIENT.username();
+      // We deliberately do NOT display the peer's identity key. It's public (the
+      // relay hands it to anyone), so it's not a leak — but the safety number is
+      // the artifact users should actually compare to verify, and showing a raw
+      // truncated key invites comparing the wrong thing. Matches the iOS app.
       box.innerHTML =
         '<span class="badge found">found</span> <b>@' +
         esc(name) +
         "</b>" +
-        '<div class="kv" style="margin-top:10px">Their identity key<br><span class="mono">' +
-        short(peerEd, 10) +
-        "</span></div>" +
         (self
           ? '<div class="note" style="margin-top:12px"><span class="ico">🪞</span><span>That’s you.</span></div>'
-          : '<div class="kv" style="margin-top:10px">Safety number (compare in person / on a call)<br><span class="mono" style="font-size:13px">' +
+          : '<div class="kv" style="margin-top:10px">Safety number (compare in person / on a call to verify)<br><span class="mono" style="font-size:13px">' +
             sn +
             "</span></div>" +
             '<button class="primary msgbtn" id="msg-peer">Message @' +
