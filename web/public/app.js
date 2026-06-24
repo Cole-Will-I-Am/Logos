@@ -27,6 +27,10 @@ const esc = (s) =>
 const nowSecs = () => Math.floor(Date.now() / 1000);
 const fmtTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const initial = (s) => (s[0] || "?").toUpperCase();
+// AI replies arrive over the wire as "✦ @Name: …" (the sender's assistant name can
+// include the "@"). Drop the "@" right after the ✦ marker so the bot reads as "✦ Name:"
+// to the receiver — keep the symbol, lose the stray "@".
+const cleanAI = (t) => String(t).replace(/^(✦\s*)@+/, "$1");
 
 // ---------- tiny IndexedDB key/value store ----------
 function idb() {
@@ -227,7 +231,7 @@ function renderList() {
     html += '<div class="convlist">';
     for (const p of peers) {
       const last = (LOGS[p] || []).at(-1);
-      const prevText = last ? (last.dir === "out" ? "You: " : "") + last.text : "New conversation";
+      const prevText = last ? (last.dir === "out" ? "You: " : "") + cleanAI(last.text) : "New conversation";
       const unread = UNREAD.has(p);
       html +=
         `<button class="convitem" data-peer="${esc(p)}">` +
@@ -290,7 +294,7 @@ function renderThread(peer) {
     if (m.dir === "sys") {
       html += `<div class="sysmsg">${esc(m.text)}</div>`;
     } else {
-      html += `<div class="bubble ${m.dir}">${esc(m.text)}<span class="meta">${fmtTime(m.ts)}</span></div>`;
+      html += `<div class="bubble ${m.dir}">${esc(cleanAI(m.text))}<span class="meta">${fmtTime(m.ts)}</span></div>`;
     }
   }
   html += "</div>";

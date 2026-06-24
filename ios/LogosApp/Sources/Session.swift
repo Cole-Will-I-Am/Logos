@@ -603,10 +603,21 @@ final class Session: ObservableObject {
     /// (the AI has no network identity, so the label travels in the text).
     private func sendAIAnswer(to peer: String, name: String, answer: String) {
         guard client != nil else { return }
-        let wire = "✦ \(name): \(answer)"
-        let msg = ChatMessage(text: answer, mine: true, status: .sending, at: Date(), aiAuthor: name)
+        let label = Self.aiDisplayLabel(name)
+        let wire = "✦ \(label): \(answer)"
+        let msg = ChatMessage(text: answer, mine: true, status: .sending, at: Date(), aiAuthor: label)
         messages[peer, default: []].append(msg)
         deliver(msg.id, to: peer, text: wire)
+    }
+
+    /// The assistant's shown label for an AI answer. Strips a leading "@" the user may
+    /// have baked into the name (e.g. "@Logos"), so the bot reads as "✦ Logos:" for the
+    /// sender, the receiver, the web client, and groups — never "✦ @Logos:". The "@" is a
+    /// mention-trigger artifact, not part of the displayed name.
+    static func aiDisplayLabel(_ name: String) -> String {
+        var s = name
+        while s.hasPrefix("@") { s.removeFirst() }
+        return s.isEmpty ? name : s
     }
 
     /// Post an AI answer into a group thread: a local assistant-attributed bubble, and on
@@ -615,8 +626,9 @@ final class Session: ObservableObject {
     private func sendAIAnswerToGroup(_ groupId: String, name: String, answer: String) {
         guard let client else { return }
         let key = Self.groupKey(groupId)
-        let wire = "✦ \(name): \(answer)"
-        let msg = ChatMessage(text: answer, mine: true, status: .sending, at: Date(), aiAuthor: name)
+        let label = Self.aiDisplayLabel(name)
+        let wire = "✦ \(label): \(answer)"
+        let msg = ChatMessage(text: answer, mine: true, status: .sending, at: Date(), aiAuthor: label)
         messages[key, default: []].append(msg)
         let id = msg.id
         Task {
