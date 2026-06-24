@@ -427,7 +427,8 @@ struct ChatView: View {
     /// ("@Logos AI", "@LogosAI", or "@Logos"). Longest-first so the full name is removed
     /// whole before the bare first word.
     private func strippedQuestion(_ text: String) -> String {
-        let n = aiName.trimmingCharacters(in: .whitespaces)
+        var n = aiName.trimmingCharacters(in: .whitespaces)
+        while n.hasPrefix("@") { n.removeFirst() } // tolerate a name that already includes "@"
         let forms = Set([n, n.replacingOccurrences(of: " ", with: ""),
                          n.split(separator: " ").first.map(String.init) ?? n])
             .filter { !$0.isEmpty }.sorted { $0.count > $1.count }

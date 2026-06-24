@@ -501,7 +501,11 @@ final class Session: ObservableObject {
     /// "x@logos.com" doesn't trigger, and the handle must end the token (so "@logosity"
     /// doesn't match "@logos").
     static func mentionsAI(_ text: String, name: String) -> Bool {
-        let n = name.trimmingCharacters(in: .whitespaces).lowercased()
+        // Strip any leading "@" the user baked into the NAME itself (e.g. they named the
+        // assistant "@Logos"). Without this we'd build the handle "@logos" and look for
+        // "@@logos", so typing "@Logos" would never match — the exact failure users hit.
+        var n = name.trimmingCharacters(in: .whitespaces).lowercased()
+        while n.hasPrefix("@") { n.removeFirst() }
         guard !n.isEmpty else { return false }
         var handles: Set<String> = [n.replacingOccurrences(of: " ", with: "")]
         if let first = n.split(separator: " ").first, first.count >= 2 {
