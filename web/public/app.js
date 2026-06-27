@@ -19,6 +19,9 @@ const show = (id) => {
   for (const v of ["onboard", "recovery", "app", "loading"]) {
     $("view-" + v).classList.toggle("hidden", v !== id);
   }
+  // The landing/marketing content lives below the onboarding view; show it only there.
+  const learn = $("learn");
+  if (learn) learn.classList.toggle("hidden", id !== "onboard");
 };
 const bytesToHex = (a) => Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
 const short = (hex, n = 8) => hex.slice(0, n) + "…" + hex.slice(-n);

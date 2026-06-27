@@ -3,18 +3,106 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Logos — private, end-to-end encrypted messaging</title>
+<title>Logos — private, post-quantum end-to-end encrypted messenger</title>
 <link rel="canonical" href="https://logos.manticthink.com/">
-<meta name="description" content="Logos is an end-to-end encrypted, post-quantum messenger. Create an identity in your browser — keys never leave your device — and reach people on the Logos iOS app.">
+<meta name="description" content="Logos is a private, end-to-end encrypted messenger with post-quantum key exchange (PQXDH) and no phone number. Create an identity in your browser — your keys never leave your device — and message anyone on Logos, including the iOS app.">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="keywords" content="encrypted messenger, end-to-end encryption, post-quantum, PQXDH, private messaging, no phone number, secure chat">
 <meta name="theme-color" content="#FAF7F1" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#15120D" media="(prefers-color-scheme: dark)">
-<link rel="icon" type="image/png" href="/logos-icon.png">
-<link rel="apple-touch-icon" href="/logos-icon.png">
+
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.json">
+
+<!-- Open Graph -->
 <meta property="og:type" content="website">
-<meta property="og:title" content="Logos — private, end-to-end encrypted messaging">
-<meta property="og:description" content="Post-quantum E2EE messaging. Your keys are generated in your browser and never leave your device.">
+<meta property="og:site_name" content="Logos">
+<meta property="og:locale" content="en_US">
+<meta property="og:title" content="Logos — private, post-quantum end-to-end encrypted messenger">
+<meta property="og:description" content="End-to-end encrypted messaging with post-quantum key exchange and no phone number. Your keys are generated in your browser and never leave your device.">
 <meta property="og:url" content="https://logos.manticthink.com/">
+<meta property="og:image" content="https://logos.manticthink.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Logos — end-to-end encrypted, post-quantum messaging">
+
+<!-- Twitter / X -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Logos — private, post-quantum end-to-end encrypted messenger">
+<meta name="twitter:description" content="End-to-end encrypted messaging with post-quantum key exchange and no phone number. Keys never leave your device.">
+<meta name="twitter:image" content="https://logos.manticthink.com/og.png">
+<meta name="twitter:image:alt" content="Logos — end-to-end encrypted, post-quantum messaging">
+
 <link rel="stylesheet" href="/styles.css">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://logos.manticthink.com/#website",
+      "url": "https://logos.manticthink.com/",
+      "name": "Logos",
+      "description": "Private, end-to-end encrypted messenger with post-quantum key exchange.",
+      "inLanguage": "en"
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://logos.manticthink.com/#app",
+      "name": "Logos",
+      "applicationCategory": "CommunicationApplication",
+      "operatingSystem": "Web, iOS",
+      "url": "https://logos.manticthink.com/",
+      "image": "https://logos.manticthink.com/og.png",
+      "description": "Logos is a private, end-to-end encrypted messenger. Sessions use the PQXDH hybrid handshake (X25519 + ML-KEM-1024) and a Double Ratchet, so messages stay private even against a future quantum computer. Keys are generated in your browser and never leave your device; there is no phone number.",
+      "isAccessibleForFree": true,
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "featureList": [
+        "Post-quantum key exchange (PQXDH: X25519 + ML-KEM-1024)",
+        "End-to-end encryption with a Double Ratchet",
+        "Sealed sender — the relay never sees plaintext",
+        "No phone number or email required",
+        "Keys are generated and stored on your device",
+        "Safety-number verification",
+        "Works with the Logos iOS app"
+      ]
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://logos.manticthink.com/#faq",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Is Logos really end-to-end encrypted?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes. All encryption happens on your device. The relay is a minimal-trust store-and-forward that only ever holds sealed, unreadable envelopes — it never sees message plaintext. Logos is still experimental and unaudited, so don't rely on it for high-stakes secrets yet." }
+        },
+        {
+          "@type": "Question",
+          "name": "Do I need a phone number to use Logos?",
+          "acceptedAnswer": { "@type": "Answer", "text": "No. You pick a username — there is no phone number, no email, and no contact upload." }
+        },
+        {
+          "@type": "Question",
+          "name": "What is post-quantum key exchange?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Logos starts every session with PQXDH, a hybrid handshake that combines classical X25519 with ML-KEM-1024. An attacker would have to break both, so messages captured today stay private even against a future quantum computer (defeating 'harvest now, decrypt later')." }
+        },
+        {
+          "@type": "Question",
+          "name": "Can I message people on the Logos iOS app from the web?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes. The web client and the iOS app share the same network. You can look up any Logos username, verify their safety number, and start an encrypted conversation." }
+        },
+        {
+          "@type": "Question",
+          "name": "What happens if I lose my recovery secret?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Your identity can't be recovered. Because keys live only on your device, no one — including us — can reset your account. Save your recovery secret somewhere safe." }
+        }
+      ]
+    }
+  ]
+}
+</script>
 </head>
 <body>
 <header class="topbar">
@@ -121,6 +209,78 @@
   <!-- loading -->
   <section id="view-loading" class="center hidden">
     <div class="card" style="text-align:center"><span class="spin"></span> <span class="muted">Loading secure core…</span></div>
+  </section>
+
+  <!-- ============ LEARN (crawlable landing content; hidden once signed in) ============ -->
+  <section id="learn" class="learn" aria-label="About Logos">
+
+    <h2 class="learn-h">Private messaging, built to outlast the quantum era</h2>
+    <p class="learn-sub">Logos is an end-to-end encrypted messenger with no phone number. Every conversation is sealed on your device — the relay only ever forwards unreadable envelopes, on the web and on iOS.</p>
+
+    <div class="feature-grid">
+      <div class="feature">
+        <div class="fi">🛡️</div>
+        <h3>Post-quantum key exchange</h3>
+        <p>Sessions begin with PQXDH — a hybrid of classical X25519 and ML-KEM-1024. An attacker would have to break both, so messages captured today stay private against tomorrow's quantum computers.</p>
+      </div>
+      <div class="feature">
+        <div class="fi">🔒</div>
+        <h3>End-to-end encrypted</h3>
+        <p>A Double Ratchet rekeys every message with forward secrecy and post-compromise security, sealing it with ChaCha20-Poly1305. Only you and the person you're talking to can read it.</p>
+      </div>
+      <div class="feature">
+        <div class="fi">✉️</div>
+        <h3>Sealed sender</h3>
+        <p>The relay is minimal-trust: it stores public keys and sealed blobs, never plaintext, and sealed-sender certificates keep it from learning who is messaging whom.</p>
+      </div>
+      <div class="feature">
+        <div class="fi">📵</div>
+        <h3>No phone number</h3>
+        <p>Pick a username. No phone number, no email, no contact upload — your identity isn't tied to a SIM card.</p>
+      </div>
+      <div class="feature">
+        <div class="fi">🔑</div>
+        <h3>Keys never leave your device</h3>
+        <p>Identity and message keys are generated locally in your browser and stored only there. The server never sees a private key.</p>
+      </div>
+      <div class="feature">
+        <div class="fi">✅</div>
+        <h3>Verify with safety numbers</h3>
+        <p>Compare a safety number with anyone — including people on the iOS app — to confirm there's no machine in the middle of your conversation.</p>
+      </div>
+    </div>
+
+    <h2 class="learn-h">How it works</h2>
+    <ol class="steps">
+      <li><span class="sn">1</span><div><b>Create an identity.</b> Pick a username — your keys are generated right here in your browser.</div></li>
+      <li><span class="sn">2</span><div><b>Save your recovery secret.</b> It's the only way to restore your identity if you lose this browser; we can't recover it for you.</div></li>
+      <li><span class="sn">3</span><div><b>Find someone and chat.</b> Look up a username, check the safety number, and start an end-to-end encrypted conversation — on web or iOS.</div></li>
+    </ol>
+
+    <h2 class="learn-h">Frequently asked questions</h2>
+    <div class="faq">
+      <details>
+        <summary>Is Logos really end-to-end encrypted?</summary>
+        <p>Yes. All encryption happens on your device, and the relay only ever holds sealed, unreadable envelopes — it never sees message plaintext. Logos is still experimental and unaudited, so don't rely on it for high-stakes secrets yet.</p>
+      </details>
+      <details>
+        <summary>Do I need a phone number?</summary>
+        <p>No. You pick a username — there's no phone number, no email, and no contact upload.</p>
+      </details>
+      <details>
+        <summary>What is post-quantum key exchange?</summary>
+        <p>Logos starts every session with PQXDH, a hybrid handshake combining classical X25519 with ML-KEM-1024. Breaking it requires breaking both, so messages captured today stay private even against a future quantum computer — defeating "harvest now, decrypt later."</p>
+      </details>
+      <details>
+        <summary>Can I message people on the Logos iOS app?</summary>
+        <p>Yes. The web client and the iOS app share the same network — look up any Logos username, verify the safety number, and start chatting.</p>
+      </details>
+      <details>
+        <summary>What if I lose my recovery secret?</summary>
+        <p>Your identity can't be recovered. Keys live only on your device, so no one — including us — can reset your account. Keep your recovery secret somewhere safe.</p>
+      </details>
+    </div>
+
   </section>
 
 </main>

@@ -266,3 +266,25 @@ footer .warn { color: var(--caution); font-weight: 600; letter-spacing: .3px; }
 .hidden { display: none !important; }
 .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--gold-wash); border-top-color: var(--gold); border-radius: 50%; animation: s .7s linear infinite; vertical-align: -2px; }
 @keyframes s { to { transform: rotate(360deg); } }
+
+/* ---- learn / marketing (landing only; #learn is hidden once signed in) ---- */
+.learn { max-width: 920px; margin: 36px auto 0; }
+.learn-h { font-family: var(--serif); font-weight: 600; font-size: 24px; text-align: center; margin: 44px 0 6px; letter-spacing: .2px; }
+.learn-sub { text-align: center; color: var(--ink-2); max-width: 640px; margin: 0 auto; font-size: 15px; }
+.feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 24px; }
+@media (max-width: 820px) { .feature-grid { grid-template-columns: 1fr; } }
+.feature { background: var(--surface); border: 1px solid var(--hairline); border-radius: var(--radius); padding: 18px; }
+.feature .fi { font-size: 22px; line-height: 1; }
+.feature h3 { font-family: var(--serif); font-weight: 600; font-size: 16px; margin: 9px 0 6px; }
+.feature p { margin: 0; font-size: 13.5px; color: var(--ink-2); line-height: 1.5; }
+.steps { list-style: none; padding: 0; margin: 20px auto 0; max-width: 640px; display: flex; flex-direction: column; gap: 12px; }
+.steps li { display: flex; gap: 14px; align-items: flex-start; background: var(--surface); border: 1px solid var(--hairline); border-radius: 12px; padding: 14px 16px; font-size: 14px; color: var(--ink-2); line-height: 1.5; }
+.steps .sn { flex: none; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: var(--gold-wash); color: var(--gold-text); font-family: var(--serif); font-weight: 700; border: 1px solid color-mix(in srgb, var(--gold) 30%, transparent); }
+.steps b { color: var(--ink); font-weight: 600; }
+.faq { max-width: 700px; margin: 20px auto 0; }
+.faq details { border: 1px solid var(--hairline); border-radius: 12px; background: var(--surface); padding: 2px 16px; margin-bottom: 10px; }
+.faq summary { cursor: pointer; font-weight: 600; font-size: 14.5px; padding: 13px 0; list-style: none; }
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::after { content: "+"; float: right; color: var(--gold-text); font-weight: 700; font-size: 17px; line-height: 1.2; }
+.faq details[open] summary::after { content: "\2013"; }
+.faq details p { margin: 0 0 14px; font-size: 13.5px; color: var(--ink-2); line-height: 1.55; }
